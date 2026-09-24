@@ -1,0 +1,40 @@
+# Hermès configuration — Phase C (market intelligence only, READ-ONLY)
+#
+# Unknown keys are rejected on load (typo protection).
+# Values here are defaults for development against local TWS.
+
+[safety]
+# MUST remain false during Phase C. Loading fails if set to true.
+orders_enabled = false
+
+[ibkr]
+host = "127.0.0.1"
+port = 7496
+# Dedicated clientId for the Phase C market-data connection.
+# (Phase B diagnostics use 101-103; a future execution connection will use its own id.)
+client_id = 110
+connect_timeout_s = 8.0
+# MUST remain true during Phase C (mirrors the TWS "Read-Only API" setting). Loading fails otherwise.
+read_only = true
+heartbeat_interval_ms = 1000
+
+[instrument]
+instrument_id = 1
+symbol = "MNQ"
+sec_type = "FUT"
+exchange = "CME"
+currency = "USD"
+trading_class = "MNQ"
+# Contract month; the exact contract (conId) is resolved dynamically via reqContractDetails().
+last_trade_date_or_contract_month = "202612"
+
+[book]
+depth_rows = 10                 # rows requested per side (reqMktDepth numRows)
+min_valid_rows = 5              # minimum rows per side for VALID (full depth NOT required)
+settle_ms = 500                 # all conditions must hold continuously this long before VALID
+max_update_age_ms = 5000        # no depth update for longer => UPDATE_AGE issue
+transient_grace_ms = 250        # crossed/unsorted tolerated this long before becoming an issue
+bbo_tolerance_ticks = 0         # allowed |book top - tick-by-tick BBO| (grid units == ticks for MNQ)
+bbo_mismatch_grace_ms = 1000    # stream-synchronization tolerance before BBO_MISMATCH
+escalate_after_ms = 3000        # persistent crossed/unsorted/BBO mismatch => STALE + resync
+require_bbo_confirmation = true # book can never be VALID without the tick-by-tick BBO reference
