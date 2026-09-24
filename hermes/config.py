@@ -55,7 +55,7 @@ class BookConfig:
     depth_rows: int = 10
     min_valid_rows: int = 5
     settle_ms: int = 500
-    max_update_age_ms: int = 5000
+    max_update_age_ms: int = 0          # 0 = disabled: silence alone is not a failure (C3 amendment B)
     transient_grace_ms: int = 250
     bbo_tolerance_ticks: int = 0
     bbo_mismatch_grace_ms: int = 1000
@@ -64,11 +64,66 @@ class BookConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SubscriptionsConfig:
+    tick_by_tick_all_last: bool = True
+    tick_by_tick_bid_ask: bool = True      # primary BBO source (required for a VALID book by default)
+    l1_market_data: bool = True            # reqMktData: LIVE confirmation + health cross-check only
+    depth_smart: bool = False              # isSmartDepth for reqMktDepth (CME: False)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionConfig:
+    contract_timeout_s: float = 15.0
+    market_rule_timeout_s: float = 15.0
+    clock_tick_interval_ms: int = 250      # emitted only when a callback arrives (not a precise timer)
+    resync_min_interval_s: float = 5.0     # depth resubscribe pacing
+    resync_max_per_window: int = 5
+    resync_window_s: float = 300.0
+    conflict_retry_interval_s: float = 30.0  # 10197 recovery pacing
+    conflict_max_attempts: int = 3
+    recovery_attempt_timeout_s: float = 20.0  # an attempt that has not PROVEN recovery by then has failed
+    reconnect_initial_backoff_s: float = 2.0
+    reconnect_max_backoff_s: float = 60.0
+    shutdown_grace_s: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayConfig:
+    # Conservative global safety guard; NOT a model of IBKR pacing (endpoint limits may be added later).
+    max_requests_per_second: float = 10.0
+    burst: int = 20
+    first_req_id: int = 10_000
+
+
+@dataclass(frozen=True, slots=True)
+class RecorderConfig:
+    enabled: bool = True
+    directory: str = "~/hermes-data/recordings"
+    ring_capacity: int = 200_000
+    batch_max: int = 5_000
+    flush_interval_ms: int = 200
+    rotate_minutes: int = 60
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryConfig:
+    report_interval_s: float = 10.0
+    log_directory: str = "~/hermes-data/logs"
+    snapshot_interval_ms: int = 100
+    console: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class HermesConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     ibkr: IbkrConfig = field(default_factory=IbkrConfig)
     instrument: InstrumentConfig = field(default_factory=InstrumentConfig)
     book: BookConfig = field(default_factory=BookConfig)
+    subscriptions: SubscriptionsConfig = field(default_factory=SubscriptionsConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
+    gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    recorder: RecorderConfig = field(default_factory=RecorderConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -76,6 +131,11 @@ _SECTIONS: dict[str, type] = {
     "ibkr": IbkrConfig,
     "instrument": InstrumentConfig,
     "book": BookConfig,
+    "subscriptions": SubscriptionsConfig,
+    "session": SessionConfig,
+    "gateway": GatewayConfig,
+    "recorder": RecorderConfig,
+    "telemetry": TelemetryConfig,
 }
 
 
@@ -147,10 +207,44 @@ def _validate(cfg: HermesConfig) -> None:
                  "bbo_tolerance_ticks", "bbo_mismatch_grace_ms", "escalate_after_ms"):
         if getattr(b, name) < 0:
             raise ConfigError(f"[book].{name} must be >= 0")
-    if b.max_update_age_ms == 0:
-        raise ConfigError("[book].max_update_age_ms must be > 0")
     if b.escalate_after_ms < max(b.transient_grace_ms, b.bbo_mismatch_grace_ms):
         raise ConfigError("[book].escalate_after_ms must be >= transient_grace_ms and bbo_mismatch_grace_ms")
+
+
+    s = cfg.session
+    for name in ("contract_timeout_s", "market_rule_timeout_s", "resync_min_interval_s", "resync_window_s",
+                 "conflict_retry_interval_s", "recovery_attempt_timeout_s", "reconnect_initial_backoff_s",
+                 "reconnect_max_backoff_s"):
+        if getattr(s, name) <= 0:
+            raise ConfigError(f"[session].{name} must be > 0")
+    if s.shutdown_grace_s < 0:
+        raise ConfigError("[session].shutdown_grace_s must be >= 0")
+    if s.clock_tick_interval_ms <= 0:
+        raise ConfigError("[session].clock_tick_interval_ms must be > 0")
+    if s.resync_max_per_window < 1 or s.conflict_max_attempts < 1:
+        raise ConfigError("[session] retry budgets must be >= 1")
+    if s.reconnect_max_backoff_s < s.reconnect_initial_backoff_s:
+        raise ConfigError("[session].reconnect_max_backoff_s must be >= reconnect_initial_backoff_s")
+
+    g = cfg.gateway
+    if g.max_requests_per_second <= 0 or g.burst < 1:
+        raise ConfigError("[gateway] rate limit must be positive")
+    if g.first_req_id < 1:
+        raise ConfigError("[gateway].first_req_id must be >= 1")
+
+    r = cfg.recorder
+    if r.ring_capacity < 16 or r.batch_max < 1 or r.flush_interval_ms < 1 or r.rotate_minutes < 1:
+        raise ConfigError("[recorder] sizes/intervals out of range (ring_capacity >= 16)")
+    if not r.directory.strip():
+        raise ConfigError("[recorder].directory must not be empty")
+
+    t = cfg.telemetry
+    if t.report_interval_s <= 0 or t.snapshot_interval_ms < 1:
+        raise ConfigError("[telemetry] intervals must be > 0")
+
+    sub = cfg.subscriptions
+    if cfg.book.require_bbo_confirmation and not sub.tick_by_tick_bid_ask:
+        raise ConfigError("[book].require_bbo_confirmation needs [subscriptions].tick_by_tick_bid_ask = true")
 
 
 def config_from_mapping(data: Mapping[str, Any]) -> HermesConfig:

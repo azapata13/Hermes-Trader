@@ -2,6 +2,8 @@
 #
 # Unknown keys are rejected on load (typo protection).
 # Values here are defaults for development against local TWS.
+# All [book] thresholds are INITIAL defaults, not strategy-optimized values; they will be
+# calibrated from recorded MNQ sessions.
 
 [safety]
 # MUST remain false during Phase C. Loading fails if set to true.
@@ -32,9 +34,49 @@ last_trade_date_or_contract_month = "202612"
 depth_rows = 10                 # rows requested per side (reqMktDepth numRows)
 min_valid_rows = 5              # minimum rows per side for VALID (full depth NOT required)
 settle_ms = 500                 # all conditions must hold continuously this long before VALID
-max_update_age_ms = 5000        # no depth update for longer => UPDATE_AGE issue
+max_update_age_ms = 0           # 0 = disabled. Silence alone is not a failure (amendment B); age is telemetry
 transient_grace_ms = 250        # crossed/unsorted tolerated this long before becoming an issue
 bbo_tolerance_ticks = 0         # allowed |book top - tick-by-tick BBO| (grid units == ticks for MNQ)
 bbo_mismatch_grace_ms = 1000    # stream-synchronization tolerance before BBO_MISMATCH
 escalate_after_ms = 3000        # persistent crossed/unsorted/BBO mismatch => STALE + resync
 require_bbo_confirmation = true # book can never be VALID without the tick-by-tick BBO reference
+
+[subscriptions]
+tick_by_tick_all_last = true
+tick_by_tick_bid_ask = true     # primary BBO source
+l1_market_data = true           # reqMktData: marketDataType/LIVE confirmation + health cross-check ONLY
+depth_smart = false             # isSmartDepth (CME: false)
+
+[session]
+contract_timeout_s = 15.0
+market_rule_timeout_s = 15.0
+clock_tick_interval_ms = 250    # ticks are emitted at callback entry when due: NOT a precise timer (C5 revisits)
+resync_min_interval_s = 5.0     # depth resubscribe pacing
+resync_max_per_window = 5       # budget; exhausted => depth UNAVAILABLE + critical alert, no more retries
+resync_window_s = 300.0
+conflict_retry_interval_s = 30.0   # error 10197 recovery pacing
+conflict_max_attempts = 3          # then UNAVAILABLE + critical alert, automatic retries stop
+recovery_attempt_timeout_s = 20.0  # time can only FAIL an attempt, never prove recovery
+reconnect_initial_backoff_s = 2.0
+reconnect_max_backoff_s = 60.0
+shutdown_grace_s = 1.0
+
+[gateway]
+# Conservative global safety guard, not a model of IBKR pacing rules.
+max_requests_per_second = 10.0
+burst = 20
+first_req_id = 10000
+
+[recorder]
+enabled = true
+directory = "~/hermes-data/recordings"   # outside the source repository
+ring_capacity = 200000
+batch_max = 5000
+flush_interval_ms = 200
+rotate_minutes = 60
+
+[telemetry]
+report_interval_s = 10.0
+log_directory = "~/hermes-data/logs"
+snapshot_interval_ms = 100
+console = true

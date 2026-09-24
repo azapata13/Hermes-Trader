@@ -15,7 +15,10 @@ Rules
   without modifying ibapi internals — decision 4).
 
 Local (non-IBKR) events that influence engine state — timer ticks, the requests we issued,
-recording gaps, session markers — are also RawEvents so replay can reproduce them.
+control decisions, session markers — are also RawEvents so replay can reproduce them.
+Recording gaps are NOT raw events: they are file-level records written by the recorder
+(``hermes.storage.recorder.RecordingGap``) so the raw ``seq`` space stays contiguous and
+continuity can be verified independently.
 """
 
 from __future__ import annotations
@@ -78,6 +81,26 @@ class RawTickByTickBidAsk(RawIbkrEvent):
     ask_size: Decimal
     bid_past_low: bool
     ask_past_high: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RawTickPrice(RawIbkrEvent):
+    """``tickPrice`` from reqMktData (L1). Health cross-check only."""
+
+    req_id: int
+    tick_type: int
+    price: float
+    past_limit: bool = False
+    pre_open: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RawTickSize(RawIbkrEvent):
+    """``tickSize`` from reqMktData (L1). Health cross-check only."""
+
+    req_id: int
+    tick_type: int
+    size: Decimal
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -165,28 +188,51 @@ class RawLocalEvent(RawEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RawTimerTick(RawLocalEvent):
-    """Emitted by the adapter at callback entry when a timer interval has elapsed."""
+    """Emitted by the pipeline at callback entry when a timer interval has elapsed.
+
+    Ticks are NOT a precise timer (they are only emitted when a callback arrives; the 1 s
+    heartbeat guarantees callbacks while connected). ``due_mono_ns`` is when the tick was due,
+    ``recv_mono_ns`` when it was actually emitted; ``coalesced`` counts elapsed intervals.
+    """
+
+    due_mono_ns: int
+    coalesced: int = 1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RawRequestIssued(RawLocalEvent):
-    """Every subscription / cancel / query sent to TWS (allowlisted requests only)."""
+    """Every request sent to TWS through the RequestGateway (allowlisted requests only).
+
+    ``sent_mono_ns`` / ``sent_wall_ns`` are captured inside the gateway immediately before the
+    send. The header ``seq`` / ``recv_*`` fields are assigned later, when the event is sequenced
+    on the dispatch thread.
+    """
 
     method: str
     req_id: int | None
+    sent_mono_ns: int
+    sent_wall_ns: int
+    instrument_id: int = 0
     params: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RawRecordingGap(RawLocalEvent):
-    """Recorder overflow: raw events first_seq..last_seq (inclusive) were NOT recorded.
+class RawRequestFailed(RawLocalEvent):
+    """The client call for a previously issued request raised locally (nothing reached TWS)."""
 
-    The recording is not replay-complete from ``first_seq`` onward.
-    """
+    method: str
+    req_id: int | None
+    error: str
+    instrument_id: int = 0
 
-    first_seq: int
-    last_seq: int
-    count: int
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RawControl(RawLocalEvent):
+    """Supervisor / operator decisions the engine must see (e.g. connect attempts, recovery
+    attempts, operator retry). Recorded so replay reproduces engine state exactly."""
+
+    kind: str
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -1,6 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
-Status: **APPROVED** (architecture review + amendments of 2026-09-24)
+Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (pending live smoke test on the Mac) · C4+ not started.
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -8,21 +9,47 @@ disagree, one of them is a bug: fix the code or amend this document explicitly.
 
 ---
 
-## 0. Decision log (approved amendments)
+## 0. Decision log
+
+### 0.1 Architecture amendments (approved with C1/C2)
 
 | # | Decision |
 |---|----------|
-| 1 | Tick-by-tick `BidAsk` is the **primary BBO source**. Top-of-book from market depth is a **cross-check**. Subscription capacity is never assumed: if IBKR rejects the extra tick-by-tick subscription, Hermès fails safe (book can never become `VALID` while `require_bbo_confirmation = true`). |
-| 2 | **MNQ only** for Phase C implementation/validation. `instrument_id` / multi-instrument support exists in every event and state object from day one. NQ is added later as a contextual stream. |
-| 3 | Depth rows default **10, configurable**. Book validity uses a **configurable minimum depth** plus: both sides present, strictly sorted prices, non-stale updates, non-persistent crossed state, and top-of-book agreement with tick-by-tick BidAsk within a synchronization tolerance. It does **not** require all rows populated. |
-| 4 | **Single writer / deterministic engine.** Phase C uses the **official** ibapi `EReader` + `EClient.run()` dispatch. The thread executing EWrapper callbacks is the **sole MarketEngine writer**. We do **not** replace `run()` or subclass/modify `EReader`. Timestamp at callback entry. Replace ibapi internals only if measurements prove the official path is a material bottleneck. |
-| 5 | Pipeline is explicitly `RawIbkrEvent → Normalizer → MarketEvent → MarketEngine`. The **authoritative recording / replay source is the raw stream** (`RawEvent`: IBKR callbacks + local control events). Normalized events may be recorded for diagnostics only. |
-| 6 | The recorder **never blocks** the engine. On overflow: live continues, a `RecordingGap` is recorded when possible, the recording is marked **not replay-complete from that sequence**, telemetry increments, and live/replay equivalence is not claimed beyond that point. |
-| 7 | Integer price units internally, via a **`PriceGrid`** abstraction built from `ContractDetails.minTick` **and** `marketRuleIds` / `reqMarketRule` (not minTick alone). MNQ resolves to the 0.25 CME grid. |
-| 8 | Error **10197** is treated per current IBKR semantics as a **market-data session conflict** that **hard-blocks market validity while it exists**. No assumption about what triggers it. |
-| 9 | `tradingHours` / `liquidHours` are **exchange session context only**. User-authorized entry hours are a separate, later **`UserTradingWindow`** used by strategy/risk gating. |
-| 10 | No IBC / third-party IB Gateway automation dependency in Phase C. Evaluated at deployment time. |
-| 11 | TWS Read-Only stays enabled. **No order execution path exists in Phase C.** `ReadOnlyClient` guard + tests blocking `placeOrder` / `cancelOrder` / `exerciseOptions` / etc. are approved. |
+| 1 | Tick-by-tick `BidAsk` is the **primary BBO source**; depth top-of-book is a **cross-check**. Subscription capacity is never assumed: if IBKR rejects the extra tick-by-tick subscription, Hermès fails safe (book can never become `VALID` while `require_bbo_confirmation = true`). |
+| 2 | **MNQ only** in Phase C. `instrument_id` exists in every event/state object from day one; NQ is added later as a contextual stream. |
+| 3 | Depth rows default **10, configurable**. Validity uses a **configurable minimum depth** plus sorted prices, non-persistent crossed state and BBO agreement within a synchronization tolerance. Full depth is **not** required. |
+| 4 | **Single writer / deterministic engine** on the **official** ibapi `EReader` + `EClient.run()` path. The callback thread is the sole MarketEngine writer. No replacement/subclassing of ibapi internals unless measurements prove a bottleneck. |
+| 5 | `RawIbkrEvent → Normalizer → MarketEvent → MarketEngine`. The **raw stream is the authoritative recording/replay source**. |
+| 6 | The recorder **never blocks**. On overflow: live continues, a `RecordingGap` is recorded when possible, the recording is **not replay-complete from that seq**, telemetry increments; no equivalence claim beyond that point. |
+| 7 | Integer price units via **`PriceGrid`** from `minTick` **and** `marketRuleIds`/`reqMarketRule`. |
+| 8 | **10197** = market-data session conflict ⇒ **hard block** while it exists. No assumption about its trigger. |
+| 9 | `tradingHours`/`liquidHours` are exchange context only; authorized entry hours = future **`UserTradingWindow`**. |
+| 10 | No IBC / third-party gateway automation in Phase C. |
+| 11 | TWS Read-Only stays enabled; **no order execution path** exists in Phase C. |
+
+### 0.2 C3 decisions
+
+| # | Decision |
+|---|----------|
+| D1 | **msgpack** (pinned `1.2.2`) is the recording codec; the format is explicitly **schema-versioned** and self-describing. |
+| D2 | **reqMktData (L1) enabled by default** — used ONLY for `marketDataType`/LIVE confirmation and health cross-checks, never for aggressor classification or order-flow calculations. |
+| D3 | 10197 recovery does **not** require a new trade print (quiet markets are legitimate). |
+| D4 | 10197 retries are **automatic but bounded**: every 30 s, **max 3 consecutive attempts**; then relevant market data UNAVAILABLE, automatic resubscription stops, critical alert. Budget resets only on a meaningful connection/session change or explicit operator retry. No infinite loops. |
+| D5 | Recordings default to **`~/hermes-data/recordings/`** (outside the repo; configurable). Logs default to `~/hermes-data/logs/`. |
+| D6 | Depth: 10 rows default, configurable. |
+| D7 | Thresholds (min depth 5, settle 500 ms, crossed/unsorted grace 250 ms, BBO mismatch grace 1 s, stale escalation 3 s) are **initial defaults only** — configuration parameters to be calibrated from recorded MNQ sessions. |
+| D8 | Phase B diagnostics are ported to `ReadOnlyClient` and live under `tools/phase_b/`. There is **no** direct-EClient exception anywhere. |
+
+### 0.3 C3 amendments
+
+| # | Amendment | Implementation |
+|---|-----------|----------------|
+| A | **Subscription generations.** Every (re)subscription uses a new reqId; callbacks of replaced reqIds are recorded raw but never mutate state. | Gateway allocates monotonically increasing, never-reused reqIds. Normalizer tracks the ACTIVE reqId per (instrument, stream) from recorded `RawRequestIssued`; old-reqId callbacks normalize to `DataAnomalyEvent(INACTIVE_REQ_ID)` only. The engine re-checks `event.generation` against the stream's active generation (second layer). Tested for depth resync, 317, BBO/AllLast/L1 replacement, reconnect, 10197 recovery (unit + end-to-end). |
+| B | **Stream age is not a failure by itself.** | `max_update_age_ms = 0` (disabled) by default; ages are telemetry. Health combines connection state, farm state, subscription errors, marketDataType, book-vs-BBO consistency, recovery state. A trade far outside an old BBO increments `bbo_frozen_suspect` (evidence, not a verdict). |
+| C | **Clock ticks are not a precise timer.** | `RawTimerTick` is emitted at callback entry when due; it records `due_mono_ns` (when due), `recv_mono_ns` (when emitted) and `coalesced` (intervals covered). A 1 s `reqCurrentTime` heartbeat guarantees callbacks while connected. Tighter bar-close timing is revisited in C5. No ibapi internals modified. |
+| D | **True request timestamps.** | `RawRequestIssued.sent_mono_ns/sent_wall_ns` are captured inside the gateway immediately before the send; `seq`/`recv_*` are assigned later when sequenced on the dispatch thread. The event is queued BEFORE the send, so it always precedes its responses. |
+| E | **Continuity-verified replay completeness.** | Gaps are file-level records; the raw `seq` space stays contiguous. `verify_session` / `tools/inspect_recording.py` recompute continuity from the records on disk: missing seqs WITHOUT a gap record (e.g. disk full so the gap record itself failed) are reported as UNDECLARED and the recording is never reported replay-complete. |
+| F | **Request pacing is a safety guard.** | One conservative global token bucket (10 req/s, burst 20) plus optional endpoint-specific limits (`endpoint_limits`). Multi-request operations (full resubscription) check `can_send(n)` first so they are never half-sent. C3 request volume is very low (≈1 heartbeat/s + a handful of subscriptions). |
 
 ---
 
@@ -30,392 +57,271 @@ disagree, one of them is a bug: fix the code or amend this document explicitly.
 
 1. Correctness → 2. Safety → 3. Determinism → 4. Observability → 5. Testability → 6. Low latency → 7. Maintainability → 8. Measured optimization.
 
-Hard rules:
-
-- The critical path is `IBKR → deterministic Python engine → (later) risk/position management`.
-  It never waits on OpenAI/Sol, Slack, n8n, HTTP, databases, or chart rendering.
-- No blocking I/O, sleeps, network calls, or synchronous DB/log-file writes inside IBKR callbacks.
-- The engine never reads the wall clock and never uses randomness. All time enters as event fields.
-- Every state object that strategy code may consume carries an explicit **quality state**.
-  "Unknown" is a first-class value (book state, aggressor side, bar flags).
+- The critical path (`IBKR → deterministic engine → later risk/position management`) never waits on Sol, Slack, n8n, HTTP, databases or charts.
+- No blocking I/O, sleeps, network calls or synchronous log writes inside IBKR callbacks.
+- The engine never reads a clock and never uses randomness: all time enters as event fields.
+- Every consumable state carries an explicit quality state; "unknown" is first-class.
 - Displayed liquidity is evidence, never a guarantee of execution.
 
 ---
 
-## 2. Threading model
+## 2. Threading model (as implemented in C3)
 
 ```
           TWS (127.0.0.1:7496, Read-Only)
                      │ socket
       ┌──────────────▼───────────────┐
-T1    │ ibapi EReader (official)     │  reads socket → client.msg_queue
+T1    │ ibapi EReader (official)     │  socket → client.msg_queue
       └──────────────┬───────────────┘
-      ┌──────────────▼───────────────────────────────────────────────┐
-T2    │ ibapi EClient.run() (official) — "ibkr-dispatch" thread       │
-      │  EWrapper callback entry: stamp mono_ns + wall_ns             │
-      │   → IbkrAdapter builds RawIbkrEvent (seq)                     │
-      │   → (timer due?) emit RawTimerTick first                      │
-      │   → Recorder.submit(raw)          [non-blocking]              │
-      │   → Normalizer → MarketEvent(s)                               │
-      │   → MarketEngine.on_event()       [SOLE WRITER]               │
-      │   → in-thread consumers (later strategy/risk, time-budgeted)  │
-      │   → SnapshotPublisher (atomic reference swap)                 │
-      └──────────────┬───────────────────────────────────────────────┘
-T3    Recorder thread: drains bounded ring → batch encode → append file
-T4    Heartbeat/Watchdog thread: reqCurrentTime via RequestGateway,
-      samples msg_queue.qsize(), checks dispatch-thread liveness counter
-Later Sidecar process (Slack / Sol / charts / DB) via local IPC
+      ┌──────────────▼────────────────────────────────────────────────┐
+T2    │ ibapi EClient.run() (official) — "ibkr-dispatch"               │
+      │ IbkrAdapter callback: perf_counter_ns + time_ns FIRST          │
+      │  RawPipeline (lock; owner = current thread):                   │
+      │   1 drain local events (gateway requests, controls)            │
+      │   2 RawTimerTick if due                                        │
+      │   3 RawEvent(seq) → Recorder.submit   [non-blocking]           │
+      │   4 Normalizer → MarketEngine.on_event [owner-guarded]         │
+      │   5 IbkrSession.after_event (in-thread consumer) → Gateway     │
+      │   6 drain what the consumer posted; snapshot on cadence        │
+      └──────────────┬────────────────────────────────────────────────┘
+T3  recorder-writer   bounded deque → msgpack encode → append .hrec
+T4  heartbeat         reqCurrentTime every 1 s; samples msg_queue depth; read-only violation latch
+T5  telemetry         JSON report every 10 s (+ console line)
+T6  logging listener  QueueHandler → files/console (no I/O on T2)
+main                  Supervisor: connect (fresh ReadOnlyClient per attempt), reconnect with
+                      bounded backoff, SIGINT/SIGTERM clean shutdown, SIGUSR1 operator retry
 ```
 
-Rules:
-
-- **T2 is the only thread that mutates market state.** No locks on engine state.
-- Other threads read only the latest immutable `MarketSnapshot` reference (CPython reference assignment is atomic).
-- **Timer ticks without replacing `run()`:** at every callback entry the adapter checks whether a timer
-  interval has elapsed and, if so, emits `RawTimerTick` event(s) *before* the callback's own event.
-  The heartbeat thread issues `reqCurrentTime()` every `heartbeat_interval_ms`; its `currentTime`
-  response guarantees callbacks (and therefore ticks) even in silent markets, and doubles as the
-  TWS-liveness heartbeat. Timer ticks are **recorded raw events**, so replay reproduces them exactly.
-- **All outbound requests** go through one `RequestGateway` (lock-serialized, allowlisted). ibapi's
-  `Connection.sendMsg` is lock-protected, but we do not rely on the rest of `EClient` being thread-safe.
-- **Backlog indicator:** `client.msg_queue.qsize()` (read-only observation of a public attribute) sampled
-  by the watchdog and at callback entry every N events. Sustained growth ⇒ engine too slow ⇒ book marked
-  `STALE` + resubscribe (never silently drop depth events).
-- Logging from T2 uses `logging.handlers.QueueHandler` → `QueueListener` (no synchronous file I/O on T2).
-- CPU-heavy non-critical work (charts, Sol payload building, DB) lives in a **separate process** later,
-  because threads in the same process compete for the GIL.
-- Queue-hop cost is **not assumed**: if a queue between dispatch and engine is ever proposed, it must be
-  justified by measurements from the instrumentation below.
+- `connectAck` and connect errors fire on the thread calling `connect()` (before/after T2 runs). Every entry takes the pipeline lock, and the engine's **owner guard** raises if anything writes it outside the pipeline's current owner — so the engine is always driven by exactly one thread.
+- A callback never raises into ibapi (an exception would end `EClient.run()` and disconnect): failures are counted, logged and converted into a critical `internal_error` alert with books invalidated.
+- `RequestGateway` is the only path to TWS requests (lock-serialized, allowlisted, generation reqIds, true send timestamps).
+- Backlog indicators: ibapi `msg_queue.qsize()` (now/max), recorder backlog/high-watermark.
 
 ---
 
 ## 3. Event pipeline
 
-```
-IBKR callback ──► RawIbkrEvent ──► Normalizer ──► MarketEvent ──► MarketEngine
-local control ──► RawLocalEvent ─┘   (pure, deterministic, versioned)
-                     │
-                     └──► Recorder (authoritative raw stream)
-```
+### 3.1 Raw events (`hermes/ibkr/raw_events.py`, no ibapi import)
 
-### 3.1 Raw events (`hermes/ibkr/raw_events.py`)
-
-Callback-level information **before semantic normalization**: IBKR field semantics, IBKR codes
-(side 0/1, operation 0/1/2), float prices as received, `Decimal` sizes as received.
-The module imports nothing from `ibapi`, so replay works without the TWS API installed.
-
-Common header (`RawEvent`): `seq` (global, monotonic, assigned by the adapter), `recv_mono_ns`
-(`time.perf_counter_ns()` at callback entry), `recv_wall_ns` (`time.time_ns()` at callback entry).
+Header: `seq` (global, contiguous), `recv_mono_ns`, `recv_wall_ns` (callback entry / sequencing time).
 
 | Raw type | Source |
 |---|---|
-| `RawMarketDepth` | `updateMktDepth` / `updateMktDepthL2` (`is_l2`, `market_maker`, `is_smart_depth` preserved) |
-| `RawTickByTickAllLast` | `tickByTickAllLast` (incl. `past_limit`, `unreported`, exchange, special conditions) |
-| `RawTickByTickBidAsk` | `tickByTickBidAsk` (incl. `bid_past_low`, `ask_past_high`) |
-| `RawContractDetails` / `RawContractDetailsEnd` | contract resolution (selected fields incl. `min_tick`, `market_rule_ids`, `valid_exchanges`, hours, tz) |
-| `RawMarketRule` | `marketRule` price increments |
-| `RawError` | `error` (reqId, errorTime, code, message, advanced JSON) |
-| `RawMarketDataType`, `RawCurrentTime`, `RawNextValidId`, `RawConnectionClosed`, `RawConnectAck` | session/control callbacks |
-| `RawTimerTick` *(local)* | adapter timer at callback entry |
-| `RawRequestIssued` *(local)* | every subscription/cancel we send (method, reqId, params) |
-| `RawRecordingGap` *(local)* | recorder overflow marker (see §7) |
-| `RawSessionMarker` *(local)* | start/stop of a recording session, config + versions |
+| `RawMarketDepth` | `updateMktDepth` / `updateMktDepthL2` |
+| `RawTickByTickAllLast`, `RawTickByTickBidAsk` | tick-by-tick |
+| `RawTickPrice`, `RawTickSize`, `RawMarketDataType` | reqMktData (L1 cross-check) |
+| `RawContractDetails`, `RawContractDetailsEnd`, `RawMarketRule` | contract resolution |
+| `RawError`, `RawCurrentTime`, `RawNextValidId`, `RawConnectAck`, `RawConnectionClosed` | session |
+| `RawTimerTick` *(local)* | `due_mono_ns`, `coalesced` (amendment C) |
+| `RawRequestIssued` *(local)* | every gateway request, `sent_mono_ns/sent_wall_ns` (amendment D) |
+| `RawRequestFailed` *(local)* | local send failure |
+| `RawControl` *(local)* | supervisor/operator decisions: `connect_attempt`, `connect_failed`, `conflict_recovery_attempt`, `operator_retry`, `depth_resync_exhausted`, `contract_timeout`, `market_rule_timeout`, `readonly_violation`, … |
+| `RawSessionMarker` *(local)* | reserved |
 
-### 3.2 Normalizer (C3)
+Recording gaps are **not** raw events (see §7).
 
-Pure function object: `RawEvent → tuple[MarketEvent, ...]` (0..n). Responsibilities:
-IBKR code mapping (side `0 = ASK`, `1 = BID`; op `0 = insert`, `1 = update`, `2 = delete`),
-`Decimal → int` sizes (non-integral ⇒ anomaly), `float → grid units` via `PriceGrid`
-(off-grid ⇒ anomaly event, not a crash), sentinel handling (e.g. empty-side prices),
-error-code classification (§9), reqId → (instrument, stream) routing.
-The normalizer carries a `NORMALIZER_VERSION`; recordings store it.
+### 3.2 Normalizer (`hermes/ibkr/normalizer.py`, `NORMALIZER_VERSION = 1`)
+
+Pure, deterministic, never raises. IBKR code mapping (side 0 = ASK / 1 = BID; op 0/1/2),
+Decimal → int sizes, float → grid units, generation routing (amendment A), error
+classification (`hermes/ibkr/errors.py`), contract resolution + PriceGrid from the recorded
+contract details and market rule (`hermes/ibkr/contracts.py`). Anomalies become
+`DataAnomalyEvent`s handled fail-safe by the engine.
 
 ### 3.3 Market events (`hermes/market/events.py`)
 
-IBKR-independent, frozen, slotted, keyword-only dataclasses. Header: `seq` (source raw seq),
-`sub` (index within that raw event), `instrument_id`, `recv_mono_ns`, `recv_wall_ns`.
-
-| Event | Payload |
-|---|---|
-| `DepthRowEvent` | `side: BookSide`, `op: DepthOp`, `position`, `price_units`, `size` |
-| `DepthResetEvent` | `reason: ResetReason` (`IBKR_317`, `RESUBSCRIBE`, `DISCONNECT`, `MANUAL`) |
-| `TradeEvent` | `price_units`, `size`, `exch_ts_s`, `exchange`, `special_conditions`, `past_limit`, `unreported` |
-| `BboEvent` | `bid_units`, `ask_units`, `bid_size`, `ask_size`, `exch_ts_s` (from tick-by-tick BidAsk) |
-| `StreamStatusEvent` | `stream: Stream`, `status: StreamStatus`, `code`, `detail` |
-| `ConnectionEvent` | `state: ConnectionState`, `code` |
-| `ClockTickEvent` | (header only) |
-| `InstrumentDefinitionEvent` | `con_id`, `symbol`, `local_symbol`, `expiry`, `multiplier`, `price_grid`, `time_zone`, `trading_hours`, `liquid_hours` |
-| `DataAnomalyEvent` | `kind`, `detail` (off-grid price, non-integral size, …) |
+Header: `seq`, `sub`, `instrument_id`, `recv_mono_ns`, `recv_wall_ns`, `generation`.
+Types: `DepthRowEvent`, `DepthResetEvent`, `TradeEvent`, `BboEvent`, `L1TickEvent`,
+`MarketDataTypeEvent`, `SubscriptionEvent`, `RequestFailedEvent`, `ErrorEvent`,
+`ConnectionEvent`, `HeartbeatEvent`, `ClockTickEvent`, `ControlEvent`, `ContractResolvedEvent`,
+`ContractFailedEvent`, `InstrumentDefinitionEvent`, `DataAnomalyEvent`.
 
 ---
 
 ## 4. Timestamps and latency instrumentation
 
-| Stamp | Where | Meaning |
+| Measurement | Where | Telemetry key |
 |---|---|---|
-| `recv_mono_ns`, `recv_wall_ns` | callback entry (T2) | earliest point available without modifying ibapi |
-| `exch_ts_s` | tick-by-tick trades / BidAsk | **1-second resolution** from IBKR; depth has **no** exchange timestamp |
-| `proc_start_ns`, `proc_end_ns` | engine | processing latency |
-| `publish_ns` | snapshot publisher | snapshot publication latency (`publish_ns − recv_mono_ns`) |
+| callback processing latency | callback entry → end of pipeline processing | `callback_total` |
+| core event processing | normalize + all engine events of one raw event | `core_total`, `normalize`, `engine_event` |
+| snapshot publication latency | callback entry → snapshot published | `snapshot_publish` |
+| recorder backlog / drops / gaps | recorder stats | `recorder.*` |
+| stream age | now − last event of the active generation (telemetry only) | `instruments.*.streams.*.age_ms` |
+| book state | state, issues, epoch, rows, resets, invalidations, violations, transitions | `instruments.*.book` |
+| subscription state | status, generation, requests, last error | `instruments.*.streams` |
+| ibapi backlog | `msg_queue.qsize()` now/max | `ibapi_msg_queue` |
 
-- Sub-second ordering comes **only** from arrival order (`seq`) and `recv_mono_ns`.
-  Velocity/burst metrics use `recv_mono_ns`.
-- Latency is aggregated in fixed-bucket histograms (p50/p99/max logged every 10 s), never per-event logs.
-- Clock-skew monitor: `recv_wall − exch_ts` on trades; persistent excess ⇒ data-delay/clock issue ⇒ entry gate.
-- Not measurable without modifying ibapi (deferred, per decision 4): socket-read time and time spent in `msg_queue`.
+Histograms: allocation-free log2 buckets (p50/p90/p99 are bucket upper bounds, max exact),
+reported per window. Exchange timestamps from IBKR have **1 s resolution**; depth has none.
 
 ---
 
-## 5. PriceGrid (`hermes/market/pricegrid.py`)
+## 5. PriceGrid
 
-- Built from `min_tick` **and** the market rule's `(low_edge, increment)` bands (`reqMarketRule`).
-  The market rule for the trading exchange is selected by position: `validExchanges[i] ↔ marketRuleIds[i]`
-  (`hermes/ibkr/market_rules.py`).
-- Internal **unit** = GCD of all increments and `min_tick` (exact `Decimal` arithmetic). Every legal price
-  is an integer number of units. For MNQ: unit = step = 0.25 ⇒ units == ticks.
-- `to_units(price)` rejects non-finite and off-grid prices (tolerance 1e-6 unit) with `OffGridPriceError`.
-- `is_legal(units)`, `step_at(units)`, `next_up/next_down`, `ticks_between(a, b)` implement band rules
-  (legal = multiple of the band's increment; prices below the first low edge use the first band).
-- `min_tick_matches_rule` flags a `minTick` inconsistent with the rule (logged, not fatal).
-- Everything downstream (book, tape, bars, metrics) works in integer units. Conversion back to float/Decimal
-  happens only at presentation boundaries.
+Unit = exact GCD of all market-rule increments and `minTick`; legality per band; off-grid /
+non-finite prices rejected; `min_tick_matches_rule` flagged. Market rule selected by position
+(`validExchanges[i] ↔ marketRuleIds[i]`). MNQ ⇒ unit 0.25 = 1 tick.
 
 ---
 
-## 6. Order book (`hermes/market/orderbook.py`)
+## 6. Order book
 
-### 6.1 Row-position semantics
+Row-position semantics (insert/update/delete with shifting and truncation), structural
+violations ⇒ STALE + `needs_resync`, liquidity changes from price→size diffs with
+window-edge flags. Quality states EMPTY → BUILDING → VALID ⇄ SUSPECT, STALE.
 
-IBKR depth is **row-indexed**, not price-indexed. Each side is a list of rows `(price_units, size)`,
-best first, at most `depth_rows` long.
-
-| Op | Valid when | Effect |
-|---|---|---|
-| INSERT | `0 ≤ pos ≤ len` and `pos < depth_rows` | insert at `pos`, rows below shift down, truncate to `depth_rows` |
-| UPDATE | `0 ≤ pos < len` | replace price **and** size at `pos` (price may change) |
-| DELETE | `0 ≤ pos < len` | remove row, rows below shift up |
-
-Any other position, or a negative size, is a **structural violation**: the row array is no longer
-knowable ⇒ book goes `STALE` immediately, rows are cleared, further row ops are ignored (counted) until a
-reset, and `needs_resync` is raised for the engine (C3) to cancel/re-request depth (rate-limited).
-
-**Liquidity changes** are computed by diffing the side's price→size map before/after each op — never from
-the op type. Each `LevelChange` carries `at_window_edge` when a level left or entered via the last visible
-row of a full side (truncation / tail refill), because that is visibility, not add/cancel.
-
-### 6.2 Quality state machine
-
-```
- EMPTY ──first row op / reset──► BUILDING ──all conditions OK for settle_ms──► VALID
-                                   ▲                                          │ condition fails
-                     reset(reason) │                                          ▼
- STALE ◄──structural violation / escalation / invalidate()────────────── SUSPECT
-   │                                                                          │
-   └──── reset(reason) ─► BUILDING                OK for settle_ms ◄──────────┘
-```
-
-Validity conditions (all required, evaluated on every book/BBO event and on clock ticks):
-
-| Condition | Issue when failing | Grace | Escalates to STALE |
+| Condition | Issue | Grace | Escalates |
 |---|---|---|---|
-| each side has ≥ `min_valid_rows` (implies both sides present) | `INSUFFICIENT_DEPTH` | – | no |
-| both sides strictly sorted (bids ↓, asks ↑) | `UNSORTED` | `transient_grace_ms` | after `escalate_after_ms` |
-| not crossed/locked (`best_bid < best_ask`) | `CROSSED` | `transient_grace_ms` | after `escalate_after_ms` |
-| last depth update age ≤ `max_update_age_ms` | `UPDATE_AGE` | – | no (session-aware handling in C9) |
-| BBO reference available (if `require_bbo_confirmation`) | `BBO_UNAVAILABLE` | – | no |
-| `|book top − BBO| ≤ bbo_tolerance_ticks` on both sides | `BBO_MISMATCH` | `bbo_mismatch_grace_ms` | after `escalate_after_ms` |
+| each side ≥ `min_valid_rows` | `INSUFFICIENT_DEPTH` | – | no |
+| strictly sorted | `UNSORTED` | `transient_grace_ms` | `escalate_after_ms` |
+| not crossed/locked | `CROSSED` | `transient_grace_ms` | `escalate_after_ms` |
+| depth update age ≤ `max_update_age_ms` | `UPDATE_AGE` | **disabled by default (0)** — amendment B | no |
+| BBO reference available | `BBO_UNAVAILABLE` | – | no |
+| \|top − BBO\| ≤ `bbo_tolerance_ticks` | `BBO_MISMATCH` | `bbo_mismatch_grace_ms` | `escalate_after_ms` |
 
-- The BBO's *absolute age* is intentionally **not** a validity condition: tick-by-tick BidAsk only updates on
-  change, so a quiet but correct BBO can be old. The synchronization/age tolerance is expressed as
-  `bbo_mismatch_grace_ms` (how long book and BBO may disagree) plus `max_update_age_ms` on the depth stream.
-- Grace absorbs the inherent race between the depth stream and the BidAsk stream (separate IBKR streams,
-  no common sub-second timestamp). A condition's timer restarts whenever it is satisfied again.
-- **Error 317**: `reset(IBKR_317)` clears both sides, increments `epoch`, clears `needs_resync`, state
-  `BUILDING`. The book is `VALID` again only when every condition holds continuously for `settle_ms`.
-- `invalidate(reason)` (disconnect, 1101, 10197, backlog overflow, …) ⇒ `STALE` + `needs_resync`.
-- `epoch` increments on every reset so consumers can detect discontinuities.
-- All time comes from event `recv_mono_ns` values (deterministic under replay).
-
-Defaults (`config/hermes.toml` → `[book]`): `depth_rows = 10`, `min_valid_rows = 5`, `settle_ms = 500`,
-`max_update_age_ms = 5000`, `transient_grace_ms = 250`, `bbo_tolerance_ticks = 0`,
-`bbo_mismatch_grace_ms = 1000`, `escalate_after_ms = 3000`, `require_bbo_confirmation = true`.
-
-**Limits of the data:** IBKR provides aggregated price-level depth (MBP, ~10 levels), not per-order data
-(MBO), and updates may be conflated. No queue-position inference; "wall persistence" means a price level
-persisted, not a specific order; no metric may assume every exchange book event is observed.
+Invalidation reasons: structural violation, persistent crossed/unsorted/BBO mismatch,
+disconnect, data lost (1101, farm broken, 2110), session conflict (10197), data not live,
+data anomaly, subscription failed, internal error, backlog, manual. Resubscription of depth
+resets the book (new epoch) deterministically via the recorded request.
 
 ---
 
-## 7. Recording and replay (C3 / C6)
+## 7. Recording and replay
 
-- **Authoritative stream:** every `RawEvent` (IBKR callbacks + local control events) in `seq` order.
-- Format: length-prefixed msgpack records, batched appends, file rotation per session/hour,
-  zstd compression at rotation (not inline). Header: schema version, normalizer version, config,
-  contract details, git hash, ibapi version, Python version. Reader tolerates a truncated last record.
-- **Non-blocking submission:** `Recorder.submit(ev) -> bool` appends to a bounded ring with one slot of
-  headroom reserved for gap markers. When full, the event is dropped and the gap range
-  (`first_seq`, `last_seq`, `count`) accumulates. On the next accepted submission, a
-  `RawRecordingGap` is enqueued first.
-- On any gap: `recording.replay_complete = False` from `first_seq` (exposed in health and written to the
-  file index), telemetry counter incremented, live/replay equivalence assertions stop at that seq.
-- Normalized `MarketEvent`s may be recorded to a separate diagnostic stream; never used as replay truth.
-- **Replay:** `ReplaySource` reads raw records → same `Normalizer` → same `MarketEngine`, time taken from the
-  recorded stamps (`ManualClock`). Modes: as-fast-as-possible (tests) and paced (visual debugging).
-- **Equivalence check:** live runs record a hash of each published snapshot; replay must reproduce the identical
-  hash sequence up to the first recording gap.
+- **Location:** `~/hermes-data/recordings/<YYYY-MM-DD>/<session_id>/part-NNNN.hrec`, rotated every `rotate_minutes`.
+- **Format:** `MAGIC` + length-prefixed msgpack records: `HEADER` (schema version, type table, session/part, meta: versions, git commit, config, contract spec), `RAW` (type code + field values), `GAP`, `FOOTER`. `Decimal` via msgpack ext type; no pickle.
+- **Submit** (dispatch thread): appends a reference to a bounded deque; one slot reserved for gap markers; never blocks.
+- **Overflow:** event dropped, gap range accumulates and is queued ahead of the next accepted event (`reason=overflow`), `replay_complete=False`, `first_gap_seq` set, counters.
+- **Write failure:** lost range recorded; the writer tries to persist a `GAP(reason=write_error)` in a new part; if that fails too, the missing seqs remain detectable (amendment E).
+- **Verification:** `verify_session` recomputes continuity; replay-complete ⇔ all seqs present, no gap records, no truncation/corruption, final part closed cleanly. `tools/inspect_recording.py` prints the report (exit 0/1/2).
+- **Replay (C3 subset):** `iter_raw_events(session)` → `Normalizer` → `MarketEngine` reproduces the live engine state exactly (tested end-to-end against a fake TWS). A full replay tool arrives in C6.
 
 ---
 
-## 8. Tape, classification, bars, metrics, market state (C4–C8, summary)
+## 8. Tape, classification, bars, metrics (C4–C8, unchanged plan)
 
-- **Tape:** bounded ring (count **and** time bound). Trades classified BUY / SELL / UNKNOWN with
-  `method` (QUOTE, QUOTE_HISTORY, TICK_RULE, NONE) and confidence, using the tick-by-tick BBO state just
-  before the trade plus a short BBO history to detect "quote updated before its trade arrived".
-  Delta always reports buy / sell / unknown volume separately.
-- **Fill vs cancel attribution:** size decreases at a price are held pending for ±W ms and matched against
-  trades at that price in either arrival order ⇒ EXECUTED / CANCELED / AMBIGUOUS.
-- **Bars (30 s / 1 m / 5 m):** UTC-epoch aligned; trades assigned by exchange timestamp; bars closed by
-  `ClockTickEvent` at boundary + grace; late trades counted/flagged, closed bars never rewritten;
-  empty intervals emit flat zero-volume bars; `flags` (GAP, BOOK_STALE, PARTIAL, LATE_TRADES);
-  `ext: Mapping[str, float]` for attached metrics.
-- **Metrics:** incremental O(1) rolling windows; imbalance (L1/L3/L5/L10, weighted), OFI, microprice,
-  signed flow, velocity, bursts, level episodes (persistence, replenishment, executed vs canceled,
-  relocation), absorption, icebergs, sweeps, spread behavior, price impact, exhaustion inputs.
-  "Large" is always relative to rolling distributions. Measurements only — no trading rules.
-- **MarketSnapshot:** immutable; built on cadence (default 100 ms), on bar close, and on demand; carries
-  `seq`, book snapshot + state/issues/epoch, BBO, recent classified trades, bars, session levels, features
-  with validity, per-stream health, recording completeness, and `data_ok_for_entry`.
+Tape (bounded, BUY/SELL/UNKNOWN with method + confidence; delta split buy/sell/unknown),
+fill-vs-cancel attribution window, bars 30 s/1 m/5 m (UTC aligned, closed by clock ticks —
+precision revisited in C5), order-flow metrics (imbalance, OFI, microprice, velocity, level
+episodes, absorption, replenishment, icebergs, sweeps, spread, impact, exhaustion inputs).
+L1 (reqMktData) is never an input to these (D2).
 
 ---
 
-## 9. Health, errors, sessions
+## 9. Health, errors, recovery
 
-| Code(s) | Handling |
-|---|---|
-| 317 | depth reset ⇒ `reset(IBKR_317)` |
-| 1100 | connectivity lost ⇒ all streams `STALE`, book `invalidate` |
-| 1101 | restored, data lost ⇒ resubscribe everything, rebuild |
-| 1102 | restored, data maintained ⇒ still re-verify book (BBO cross-check) |
-| 2103 / 2105 / 2157 ; 2104 / 2106 / 2158 | farm broken ⇒ affected streams degraded ; farm OK (informational) |
-| 2110 | TWS ↔ IBKR server connectivity broken ⇒ streams degraded |
-| 309 | max depth subscriptions exceeded ⇒ depth `UNAVAILABLE`, fail safe |
-| 354 / 10090 | not subscribed / partially subscribed ⇒ stream `UNAVAILABLE` |
-| 10167, `marketDataType` ∈ {2,3,4} | delayed/frozen data ⇒ **hard block** (never treated as live) |
-| **10197** | **market-data session conflict ⇒ hard block of market validity while it exists**; cleared only by a successful resubscription followed by fresh data (exact clearing semantics to be confirmed with live observation) |
-| tick-by-tick subscription rejected | BBO `UNAVAILABLE` ⇒ book cannot be `VALID` (decision 1) |
+| Code(s) | Class | Handling |
+|---|---|---|
+| 317 | DEPTH_RESET | active generation ⇒ book reset (new epoch), rebuild must re-validate |
+| 316 *(verify live)* | DEPTH_HALTED | active depth ⇒ invalidate ⇒ paced resync |
+| 1100 / 1300 | CONNECTIVITY_LOST | connection LOST, books invalidated |
+| 1101 | RESTORED_DATA_LOST | books invalidated, resubscribe everything |
+| 1102 | RESTORED_DATA_KEPT | connection OK; stale book resynced |
+| 2103 / 2110 | FARM_BROKEN / SERVER_CONNECTIVITY_BROKEN | degraded, books invalidated; cleared by 2104/1101/1102 |
+| 2104 | FARM_OK | clears farm-broken |
+| 2105/2106/2107/2108/2119/2157/2158, 21xx | INFO | never changes stream state |
+| 309 / 101 / 10190 *(verify)* | CAPACITY_EXCEEDED | active stream UNAVAILABLE (fail safe) |
+| 354 / 10090 / 10168 / 322 / 321 / 10189 *(verify)* | SUBSCRIPTION_REJECTED | active stream UNAVAILABLE |
+| 10167, marketDataType ≠ 1, delayed tick types | DATA_NOT_LIVE | hard block, books invalidated; cleared by a later LIVE on the active L1 generation (book must still resync) |
+| 10197 | SESSION_CONFLICT | hard block + bounded recovery (below) |
+| unknown code on an ACTIVE subscription | UNKNOWN | stream UNAVAILABLE (fail safe) |
+| "read-only" in message | READONLY_REJECTED | critical alert |
 
-- **Exchange session context** (`tradingHours`, `liquidHours`, `timeZoneId`, CME daily maintenance halt,
-  holidays) distinguishes "market closed/quiet" from "disconnected". It is **not** authorization to trade.
-- **`UserTradingWindow`** (later) is the only source of authorized entry hours; managing/closing an existing
-  position must remain operational outside it.
-- Watchdog distinguishes: heartbeat OK + no data (quiet/closed/halt) vs no heartbeat (disconnected).
-- Contract roll: warn when inside the configured roll window; contract resolution asserts exactly one match.
+**10197 recovery** (engine state machine `NONE → BLOCKED → RECOVERING → NONE | EXHAUSTED`):
+an attempt (`RawControl conflict_recovery_attempt`, paced every `conflict_retry_interval_s`,
+only if the full resubscription fits the request budget) cancels and re-requests all streams.
+The conflict clears **only** when all of the following are proven after the attempt started:
+no new 10197; every required subscription re-created with a new generation and no active
+error (AllLast needs no new print); fresh BidAsk data; fresh depth and book **VALID**;
+`marketDataType == 1` on the new L1 generation; connection CONNECTED and farm OK.
+Time can only FAIL an attempt (`recovery_attempt_timeout_s`), never prove it. After
+`conflict_max_attempts` failures: EXHAUSTED, required streams UNAVAILABLE, critical alert,
+no automatic retries until reconnect (new `nextValidId` after a closed/lost connection) or
+operator retry (`kill -USR1 <pid>`).
+
+**Depth resync** is paced (`resync_min_interval_s`) and budgeted (`resync_max_per_window` per
+`resync_window_s`); an exhausted budget raises a critical alert and stops automatic depth
+resubscription until reconnect/operator retry. Missing subscriptions (e.g. a request that was
+rate-limited) are re-issued with the same pacing.
+
+`market_data_ok` (per instrument) = connected ∧ farm OK ∧ no conflict ∧ live data confirmed on
+the active L1 generation ∧ contract defined ∧ required streams subscribed without error
+(depth/BBO/L1 ACTIVE; trades may be quiet) ∧ book VALID ∧ no critical alert. Silence alone never
+appears in the reasons. Session hours remain context only (decision 9).
 
 ---
 
-## 10. Safety: read-only enforcement (C1)
+## 10. Safety: read-only enforcement
 
-Defense in depth, all active in Phase C:
-
-1. **TWS Read-Only API** setting stays enabled.
-2. **`ReadOnlyClient`** (`hermes/ibkr/readonly.py`) — the only permitted `EClient`:
-   - **Method allowlist (default deny):** every callable on `EClient` not explicitly allowlisted is replaced
-     by a function raising `OrderApiForbiddenError`. New methods in future ibapi versions are therefore
-     blocked automatically.
-   - **Explicit forbidden set** (must never be allowlisted): `placeOrder`, `cancelOrder`, `reqGlobalCancel`,
-     `exerciseOptions`, `reqAutoOpenOrders`, `replaceFA`, `updateConfigProtoBuf`, order-parameter validators,
-     and all `…ProtoBuf` variants.
-   - **Message-id guard:** `sendMsg` / `sendMsgProtoBuf` refuse forbidden outgoing message ids
-     (`PLACE_ORDER`, `CANCEL_ORDER`, `REQ_GLOBAL_CANCEL`, `EXERCISE_OPTIONS`, `REQ_AUTO_OPEN_ORDERS`,
-     `REPLACE_FA`, `UPDATE_CONFIG`), including the protobuf offset — catches unbound-base-class bypasses.
-   - **Wire guard:** any connection assigned to `client.conn` is wrapped; every outbound frame is parsed and
-     forbidden message ids are refused *before* bytes reach the socket. Unparseable frames are refused
-     (fail closed).
-   - **Violation latch:** ibapi wraps several request bodies in `except Exception` and reports failures via
-     `EWrapper.error` instead of re-raising (observed on legacy/text server versions). Every blocked attempt is
-     therefore also latched in `client.readonly_violations`; nothing is sent in any case. From C3 on, a
-     non-empty latch is a critical safety event (engine/watchdog alert).
-   - Known residual: code that deliberately calls the unwrapped socket (`client.conn.inner.sendMsg`) is not
-     guarded by Python; the TWS Read-Only setting remains the final barrier.
-3. **Static tests:** AST scan of `hermes/` fails on any use of forbidden method names, imports of
-   `ibapi.order*`, or direct `EClient` subclassing/instantiation outside `readonly.py`
-   (legacy Phase B diagnostics are an explicit, temporary exception list).
-4. **Config:** `[safety] orders_enabled` must be `false` and `[ibkr] read_only` must be `true`, or config
-   loading fails.
-5. **No `hermes/execution` package** exists in Phase C (tested).
-6. ibapi version is pinned (**10.45.1**) because guards rely on its method/message layout; a version change
-   fails a test until the guard is re-audited.
+1. TWS **Read-Only API** stays enabled.
+2. **`ReadOnlyClient`** — allowlist/default-deny of every EClient method; forbidden set never allowlisted; message-id guard on `sendMsg`/`sendMsgProtoBuf`; wire guard on every connection object; every blocked attempt **latched** in `readonly_violations` (ibapi swallows some exceptions) and surfaced as a critical alert by the heartbeat.
+3. **Static tests** over `hermes/` **and** `tools/`: no forbidden method names, no `ibapi.order*` imports, no EClient import/subclass/construction outside `readonly.py`, `ReadOnlyClient` constructed only by the supervisor (or standalone diagnostics in `tools/`), TWS request methods called only from `RequestGateway` inside the package.
+4. Config refuses `orders_enabled = true`, `read_only = false`, `client_id = 0`.
+5. No `hermes/execution` package.
+6. ibapi pinned to **10.45.1**.
+7. End-to-end tests assert that the fake TWS never receives any order-related message id.
 
 ---
 
 ## 11. Future execution provisions (not implemented)
 
-Separate execution connection and `clientId`; broker-native protective stop attached to entry; broker is
-source of truth for positions/orders (startup reconciliation via positions/open orders/executions);
-entry gating on `data_ok_for_entry`; single-use, TTL-bound approval tokens; idempotent `orderRef`;
-partial-fill / reject handling; stops never widened once risk is reduced; standalone kill-switch script
-working without the core; position management continues outside entry hours and on stale data.
+Separate execution connection/clientId; broker-native protective stop with entry; broker as
+source of truth (startup reconciliation); entry gating on `market_data_ok` + `UserTradingWindow`;
+single-use TTL approvals; idempotent `orderRef`; partial fills/rejects; stops never widened after
+risk reduction; standalone kill switch; position management continues on stale data/outside hours.
 
 ---
 
 ## 12. Deployment
 
-Development: MacBook Pro, Python 3.11, `~/hermes-trading/.venv`. Target: Mac Mini Intel (x86_64).
-No Apple-Silicon-only dependencies; runtime deps limited to ibapi (TWS distribution, pinned) and later
-`msgpack` / `zstandard`. Dev deps: `pytest`, `hypothesis`. No IBC/third-party gateway automation in Phase C.
-Operational notes: prevent sleep/App Nap during sessions; Docker compatibility is a goal, not a Phase C task.
+Mac (Python 3.11 venv) now; Mac Mini Intel later. Runtime deps: ibapi 10.45.1 (TWS
+distribution), msgpack 1.2.2 (wheels for macOS x86_64/arm64). No IBC in Phase C. Prevent
+sleep/App Nap during sessions.
 
 ---
 
-## 13. Package layout
+## 13. Package layout (C3)
 
 ```
 hermes/
-  config.py                 TOML → frozen, validated dataclasses (stdlib tomllib)
-  core/clock.py             Clock protocol, SystemClock, ManualClock
-  ibkr/raw_events.py        RawEvent hierarchy (no ibapi import)
-  ibkr/codes.py             IBKR side/op code maps, forbidden message ids
-  ibkr/market_rules.py      marketRuleIds ↔ validExchanges selection
-  ibkr/readonly.py          ReadOnlyClient + guards
-  ibkr/adapter.py           (C3) callbacks → RawEvents, timer ticks
-  ibkr/normalizer.py        (C3) RawEvent → MarketEvent
-  ibkr/gateway.py           (C3) serialized allowlisted requests
-  market/events.py          MarketEvent hierarchy + enums
-  market/pricegrid.py       PriceGrid
-  market/orderbook.py       OrderBook (rows + quality state machine)
-  market/tape.py, classify.py, bars.py, session.py, health.py, engine.py, snapshot.py, metrics/   (C4+)
-  storage/recorder.py, replay.py, codec.py                                                       (C3/C6)
-  safety/watchdog.py                                                                             (C9)
+  config.py                    TOML → validated frozen dataclasses
+  core/clock.py latency.py telemetry.py logging_setup.py
+  ibkr/raw_events.py codes.py errors.py market_rules.py contracts.py normalizer.py
+       readonly.py gateway.py adapter.py session.py
+  market/events.py pricegrid.py orderbook.py health.py engine.py snapshot.py
+  storage/codec.py recorder.py reader.py
+  app/run_live.py              python -m hermes.app.run_live [--duration N]
+tools/inspect_recording.py     recording verification report
+tools/phase_b/*.py             Phase B diagnostics (ReadOnlyClient)
 config/hermes.toml
-docs/ARCHITECTURE_PHASE_C.md
-tests/unit, tests/property, tests/safety, (later) tests/scenarios, tests/replay, tests/live
+tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (manual)
 ```
 
 ---
 
-## 14. Test plan (Phase C reliability gate)
+## 14. Test plan status
 
-- **C1:** config validation (read-only enforced, unknown keys, types); clocks; PriceGrid (MNQ, multi-band,
-  off-grid, non-finite, legality, stepping, rule selection) incl. property round-trips; event immutability;
-  raw events importable without ibapi; ReadOnlyClient (every forbidden method raises without sending bytes,
-  default deny, unbound-bypass blocked at message-id layer, raw forbidden frames blocked at wire layer,
-  allowed requests encode and pass for legacy and protobuf server versions, allowlist call-graph closure,
-  ibapi version pin); static AST scan.
-- **C2:** row semantics (insert/update/delete incl. shifting, truncation, price-changing update),
-  structural violations ⇒ STALE, STALE ignores ops, reset/epoch, 317 rebuild criteria, min-depth validity
-  without full rows, crossed/unsorted grace and escalation, BBO unavailable/mismatch/tolerance/escalation,
-  update age, analytics (best/spread/mid/levels/totals), level-change diff incl. window-edge flags,
-  determinism; property tests against a reference model with (a) arbitrary valid ops, (b) a well-formed
-  exchange-like feed derived from a true price-level book, (c) arbitrary garbage ops (never raises, fails safe).
-- **C3–C9:** adapter mapping and error routing, recorder backpressure and gap semantics, tape/classifier cases,
-  bar boundaries and multi-timeframe consistency, metric scenarios (flash wall vs absorbing wall, iceberg,
-  sweep, exhaustion), snapshot consistency, replay determinism and live/replay equivalence, throughput/latency
-  benchmarks, memory soak, live checks (DOM comparison, disconnect recovery, historical-bar comparison).
+- **C1/C2:** config, clock, PriceGrid, events, ReadOnlyClient (3 layers + latch), static scan, order book unit + property tests.
+- **C3:** error table, contract resolution, normalizer (mapping, anomalies, generations), engine (generations, silence ≠ failure, 317, 1100/1101, farm, rejections, delayed data, 10197 proven/timeout/exhausted/budget reset, owner guard, determinism), codec round-trip for every raw type, recorder (never blocks, overflow gaps, write-error gaps, undeclared gaps, truncation, rotation), inspect tool, gateway (ReadOnlyClient only, send timestamps before send, unique reqIds, local failure, rate limits), pipeline (sequencing, timer ticks, never raises, owner guard, concurrency), adapter signature conformance with EWrapper, latency histograms, **end-to-end against a fake TWS speaking the real ibapi 10.45 protobuf wire protocol** (healthy run + live/replay equivalence, 317 + resync + late old-generation callbacks, 10197 recovery, 10197 budget exhaustion, reconnect, connection refused, no order message ever sent).
+- **Live (manual):** `tests/live/test_live_smoke.py` / `python -m hermes.app.run_live --duration 60`.
+- **C4–C9:** as planned (tape/classifier, bars, metrics scenarios, full replay tool, soak).
 
 ---
 
 ## 15. Milestones
 
-C1 skeleton/config/clock/events/PriceGrid/ReadOnlyClient · C2 order book · C3 adapter/normalizer/gateway/recorder
-(start recording live sessions) · C4 BBO/tape/classifier · C5 bars/session · C6 replay + equivalence ·
-C7 metrics L1 · C8 metrics L2 (level episodes, attribution, absorption…) · C9 health/watchdog/reconnect/soak.
+C1 ✅ · C2 ✅ · C3 ✅ (live validation pending) · C4 BBO/tape/classifier · C5 bars/session (tick
+precision) · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
+hardening/soak.
+
+---
+
+## 16. IBKR behavior requiring live validation
+
+1. Exact codes for tick-by-tick capacity/rejection (10189/10190) and depth halt (316).
+2. How TWS reports and clears 10197 (whether `marketDataType` or other messages accompany it).
+3. Whether CME depth arrives via `updateMktDepth` or `updateMktDepthL2` for this account, and whether a 317 is followed by a full re-send of the book.
+4. BidAsk vs depth top-of-book agreement/latency under real load (calibrates `bbo_mismatch_grace_ms`, tolerance).
+5. Behavior of subscriptions across 1101/1102 and farm 2103/2104 transitions.
+6. Real callback rates, `msg_queue` backlog, callback/core latency percentiles on the MacBook.
+7. Contract details for MNQ Dec 2026: `marketRuleIds`/`validExchanges` alignment, `minTick`, multiplier format.

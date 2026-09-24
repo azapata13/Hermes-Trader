@@ -1,9 +1,21 @@
+"""Phase B diagnostic — ported to ReadOnlyClient in C3 (no direct EClient use).
+
+Standalone script; run from the repository root:
+    python tools/phase_b/orderflow_test.py
+READ-ONLY: uses hermes.ibkr.readonly.ReadOnlyClient (order methods blocked in 3 layers).
+"""
+
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 import threading
 import time
 from datetime import datetime
 from decimal import Decimal
 
-from ibapi.client import EClient
+from hermes.ibkr.readonly import ReadOnlyClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
 
@@ -19,10 +31,10 @@ DEPTH_REQ_ID = 4001
 DEPTH_ROWS = 10
 
 
-class HermesOrderFlow(EWrapper, EClient):
+class HermesOrderFlow(EWrapper):
 
     def __init__(self):
-        EClient.__init__(self, self)
+        EWrapper.__init__(self)
 
         self.connected_event = threading.Event()
         self.contract_event = threading.Event()
@@ -315,6 +327,7 @@ def build_mnq_dec_2026():
 def main():
 
     app = HermesOrderFlow()
+    client = ReadOnlyClient(app)  # the only permitted EClient (read-only guard)
 
     print()
     print("================================================")
@@ -324,21 +337,21 @@ def main():
     print("================================================")
     print()
 
-    app.connect(
+    client.connect(
         HOST,
         PORT,
         clientId=CLIENT_ID
     )
 
     api_thread = threading.Thread(
-        target=app.run,
+        target=client.run,
         daemon=True
     )
     api_thread.start()
 
     if not app.connected_event.wait(timeout=8):
         print("❌ Connection failed")
-        app.disconnect()
+        client.disconnect()
         return
 
     # ------------------------------------------------------------
@@ -347,19 +360,19 @@ def main():
 
     print("🔍 Resolving MNQ Dec 2026...")
 
-    app.reqContractDetails(
+    client.reqContractDetails(
         CONTRACT_REQ_ID,
         build_mnq_dec_2026()
     )
 
     if not app.contract_event.wait(timeout=10):
         print("❌ Contract lookup timeout")
-        app.disconnect()
+        client.disconnect()
         return
 
     if app.selected_contract is None:
         print("❌ MNQ contract not found")
-        app.disconnect()
+        client.disconnect()
         return
 
     contract = app.selected_contract
@@ -368,7 +381,7 @@ def main():
     # Force live market data
     # ------------------------------------------------------------
 
-    app.reqMarketDataType(1)
+    client.reqMarketDataType(1)
 
     # ------------------------------------------------------------
     # TIME & SALES
@@ -376,7 +389,7 @@ def main():
 
     print("⚡ Starting Time & Sales...")
 
-    app.reqTickByTickData(
+    client.reqTickByTickData(
         TRADES_REQ_ID,
         contract,
         "AllLast",
@@ -390,7 +403,7 @@ def main():
 
     print("📚 Starting CME Level II...")
 
-    app.reqMktDepth(
+    client.reqMktDepth(
         DEPTH_REQ_ID,
         contract,
         DEPTH_ROWS,
@@ -425,15 +438,15 @@ def main():
 
     app.stop_event.set()
 
-    app.cancelTickByTickData(TRADES_REQ_ID)
-    app.cancelMktDepth(
+    client.cancelTickByTickData(TRADES_REQ_ID)
+    client.cancelMktDepth(
         DEPTH_REQ_ID,
         False
     )
 
     time.sleep(0.5)
 
-    app.disconnect()
+    client.disconnect()
 
     api_thread.join(timeout=2)
 

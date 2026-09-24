@@ -8,29 +8,28 @@ import sys
 from pathlib import Path
 
 from hermes.config import load_config
-from hermes.ibkr.readonly import FORBIDDEN_METHODS
+from hermes.ibkr.readonly import ALLOWED_METHODS, FORBIDDEN_METHODS
 
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "hermes"
 
 FORBIDDEN_IMPORT_PREFIXES = ("ibapi.order", "ibapi.order_cancel", "ibapi.order_condition", "ibapi.order_state")
 
-# The only module allowed to subclass / construct EClient.
+# The only module allowed to subclass / construct / import EClient.
 READONLY_MODULE = "hermes/ibkr/readonly.py"
-
-# Phase B diagnostics predating ReadOnlyClient. TEMPORARY exception to the EClient rule only:
-# they are still scanned for forbidden method names and imports. To be ported or moved in C3.
-LEGACY_ECLIENT_EXCEPTIONS = frozenset({
-    "hermes/ibkr/connection_test.py",
-    "hermes/ibkr/mnq_live_test.py",
-    "hermes/ibkr/orderflow_test.py",
-})
+# The only Hermès modules allowed to send requests / construct the client.
+GATEWAY_MODULE = "hermes/ibkr/gateway.py"
+CLIENT_FACTORY_MODULES = frozenset({READONLY_MODULE, "hermes/ibkr/session.py"})
+# EClient request method names (TWS calls). Inside the hermes package only the gateway calls them.
+REQUEST_METHODS = frozenset(n for n in ALLOWED_METHODS
+                            if n.startswith(("req", "cancel")) and not n.endswith("ProtoBuf"))
 
 
 def scan_source(src: str, rel: str) -> list[str]:
     """Return a list of violations found in one module's source."""
     problems: list[str] = []
     tree = ast.parse(src, filename=rel)
+    in_pkg = rel.startswith("hermes/")
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_METHODS:
             problems.append(f"{rel}:{node.lineno} uses forbidden attribute .{node.attr}")
@@ -43,26 +42,35 @@ def scan_source(src: str, rel: str) -> list[str]:
                 for alias in node.names:
                     if alias.name.startswith("order"):
                         problems.append(f"{rel}:{node.lineno} imports ibapi.{alias.name}")
+            if rel != READONLY_MODULE and any(a.name == "EClient" for a in node.names):
+                problems.append(f"{rel}:{node.lineno} imports EClient (use ReadOnlyClient)")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES):
                     problems.append(f"{rel}:{node.lineno} imports {alias.name}")
-        if rel != READONLY_MODULE and rel not in LEGACY_ECLIENT_EXCEPTIONS:
+        if rel != READONLY_MODULE:
             if isinstance(node, ast.ClassDef):
                 for base in node.bases:
                     name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-                    if name == "EClient":
-                        problems.append(f"{rel}:{node.lineno} subclasses EClient (use ReadOnlyClient)")
+                    if name in ("EClient", "ReadOnlyClient"):
+                        problems.append(f"{rel}:{node.lineno} subclasses {name}")
             if isinstance(node, ast.Call):
                 fn = node.func
                 name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
                 if name == "EClient":
                     problems.append(f"{rel}:{node.lineno} constructs EClient (use ReadOnlyClient)")
+                if in_pkg and name == "ReadOnlyClient" and rel not in CLIENT_FACTORY_MODULES:
+                    problems.append(f"{rel}:{node.lineno} constructs ReadOnlyClient outside the supervisor")
+                if (in_pkg and rel != GATEWAY_MODULE and isinstance(fn, ast.Attribute)
+                        and fn.attr in REQUEST_METHODS):
+                    problems.append(f"{rel}:{node.lineno} calls TWS request .{fn.attr} outside RequestGateway")
     return problems
 
 
 def _modules() -> list[Path]:
-    return sorted(p for p in PKG.rglob("*.py") if "__pycache__" not in p.parts)
+    """Everything shipped: the hermes package AND tools/ (diagnostics included)."""
+    files = [p for root in (PKG, ROOT / "tools") for p in root.rglob("*.py")]
+    return sorted(p for p in files if "__pycache__" not in p.parts)
 
 
 def test_package_has_no_order_paths():
@@ -84,17 +92,25 @@ def test_scanner_detects_violations():
         "c.placeOrder(1, None, None)\n"
         "getattr(c, 'x').cancelOrder(1)\n"
         "c.exerciseOptions()\n"
+        "r = ReadOnlyClient(w)\n"
+        "r.reqMktDepth(1, None, 10, False, [])\n"
     )
     problems = scan_source(bad, "hermes/fake.py")
     joined = "\n".join(problems)
-    for needle in ("imports ibapi.order", "imports ibapi.order_cancel", "subclasses EClient",
-                   "constructs EClient", ".placeOrder", ".cancelOrder", ".exerciseOptions"):
+    for needle in ("imports ibapi.order", "imports ibapi.order_cancel", "imports EClient", "subclasses EClient",
+                   "constructs EClient", ".placeOrder", ".cancelOrder", ".exerciseOptions",
+                   "constructs ReadOnlyClient outside", "reqMktDepth outside RequestGateway"):
         assert needle in joined, needle
+    # diagnostics under tools/ may use a ReadOnlyClient directly, never EClient or order methods
+    tool = "r = ReadOnlyClient(w)\nr.reqMktDepth(1, None, 10, False, [])\n"
+    assert scan_source(tool, "tools/phase_b/x.py") == []
 
 
-def test_legacy_exception_list_is_accurate():
-    for rel in LEGACY_ECLIENT_EXCEPTIONS:
-        assert (ROOT / rel).exists(), f"{rel} no longer exists; remove it from LEGACY_ECLIENT_EXCEPTIONS"
+def test_phase_b_diagnostics_moved_and_ported():
+    for name in ("connection_test.py", "mnq_live_test.py", "orderflow_test.py"):
+        assert not (PKG / "ibkr" / name).exists()
+        src = (ROOT / "tools" / "phase_b" / name).read_text(encoding="utf-8")
+        assert "ReadOnlyClient(app)" in src
 
 
 def test_no_execution_package():
@@ -113,7 +129,9 @@ def test_core_modules_do_not_import_ibapi():
         "import sys\n"
         "import hermes.config, hermes.core.clock, hermes.ibkr.raw_events, hermes.ibkr.codes,\\\n"
         "       hermes.ibkr.market_rules, hermes.market.events, hermes.market.pricegrid,\\\n"
-        "       hermes.market.orderbook\n"
+        "       hermes.market.orderbook, hermes.ibkr.normalizer, hermes.ibkr.contracts, hermes.ibkr.errors,\\\n"
+        "       hermes.market.engine, hermes.market.health, hermes.market.snapshot,\\\n"
+        "       hermes.storage.codec, hermes.storage.recorder, hermes.storage.reader, hermes.core.latency\n"
         "bad = [m for m in sys.modules if m == 'ibapi' or m.startswith('ibapi.')]\n"
         "assert not bad, bad\n"
     )

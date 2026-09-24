@@ -1,12 +1,12 @@
 [project]
 name = "hermes-trading"
-version = "0.3.0"
+version = "0.4.0"
 description = "Hermès — MNQ order-flow trading assistant (Phase C: market intelligence, read-only)"
 requires-python = ">=3.11"
 # Runtime dependency NOT resolvable from PyPI:
 #   ibapi == 10.45.1, installed from the official TWS API distribution
 #   (the PyPI package named "ibapi" is an unrelated, outdated upload — never pip install it).
-dependencies = []
+dependencies = ["msgpack==1.2.2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6.100"]
@@ -14,7 +14,7 @@ dev = ["pytest>=8", "hypothesis>=6.100"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not live'"
 markers = [
-    "live: requires a running TWS (never run in CI)",
+    "live: requires a running TWS (never run in CI; run with -m live and HERMES_LIVE=1)",
 ]

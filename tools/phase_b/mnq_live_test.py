@@ -1,8 +1,20 @@
+"""Phase B diagnostic — ported to ReadOnlyClient in C3 (no direct EClient use).
+
+Standalone script; run from the repository root:
+    python tools/phase_b/mnq_live_test.py
+READ-ONLY: uses hermes.ibkr.readonly.ReadOnlyClient (order methods blocked in 3 layers).
+"""
+
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 import threading
 import time
 from decimal import Decimal
 
-from ibapi.client import EClient
+from hermes.ibkr.readonly import ReadOnlyClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
 from ibapi.ticktype import TickTypeEnum
@@ -16,9 +28,9 @@ CONTRACT_REQ_ID = 1001
 MARKET_DATA_REQ_ID = 2001
 
 
-class HermesMarketTest(EWrapper, EClient):
+class HermesMarketTest(EWrapper):
     def __init__(self):
-        EClient.__init__(self, self)
+        EWrapper.__init__(self)
 
         self.connected_event = threading.Event()
         self.contract_event = threading.Event()
@@ -161,6 +173,7 @@ def build_mnq_dec_2026():
 
 def main():
     app = HermesMarketTest()
+    client = ReadOnlyClient(app)  # the only permitted EClient (read-only guard)
 
     print("================================================")
     print(" HERMES — MNQ LIVE MARKET DATA TEST")
@@ -169,40 +182,40 @@ def main():
 
     print("\nConnecting to TWS...")
 
-    app.connect(
+    client.connect(
         HOST,
         PORT,
         clientId=CLIENT_ID
     )
 
     thread = threading.Thread(
-        target=app.run,
+        target=client.run,
         daemon=True
     )
     thread.start()
 
     if not app.connected_event.wait(timeout=8):
         print("\n❌ Could not connect to TWS")
-        app.disconnect()
+        client.disconnect()
         return
 
     # ----- Resolve the exact futures contract -----
 
     print("\n🔍 Looking for MNQ Dec 18 2026...")
 
-    app.reqContractDetails(
+    client.reqContractDetails(
         CONTRACT_REQ_ID,
         build_mnq_dec_2026()
     )
 
     if not app.contract_event.wait(timeout=10):
         print("\n❌ Contract lookup timed out")
-        app.disconnect()
+        client.disconnect()
         return
 
     if app.selected_contract is None:
         print("\n❌ MNQ Dec 2026 contract not found")
-        app.disconnect()
+        client.disconnect()
         return
 
     c = app.selected_contract
@@ -214,12 +227,12 @@ def main():
 
     # Explicitly request LIVE data.
     # IBKR market-data type 1 = Live.
-    app.reqMarketDataType(1)
+    client.reqMarketDataType(1)
 
     print("\n📡 Starting real-time BID / ASK / LAST...")
     print("   Listening for 20 seconds...\n")
 
-    app.reqMktData(
+    client.reqMktData(
         MARKET_DATA_REQ_ID,
         c,
         "",       # Generic tick list
@@ -233,11 +246,11 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    app.cancelMktData(MARKET_DATA_REQ_ID)
+    client.cancelMktData(MARKET_DATA_REQ_ID)
 
     print("\n\n🛑 Market data stream stopped.")
 
-    app.disconnect()
+    client.disconnect()
     thread.join(timeout=2)
 
     print("✅ Phase B test complete.")

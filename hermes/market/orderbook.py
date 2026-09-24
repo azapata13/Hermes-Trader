@@ -21,7 +21,7 @@ Quality (validity) — all conditions required, evaluated on every book/BBO even
 * each side has >= ``min_valid_rows`` rows (full depth NOT required)     -> INSUFFICIENT_DEPTH
 * both sides strictly sorted (bids descending, asks ascending)           -> UNSORTED  (grace, escalates)
 * not crossed / locked (best bid < best ask)                             -> CROSSED   (grace, escalates)
-* last depth update age <= ``max_update_age_ms``                         -> UPDATE_AGE
+* last depth update age <= ``max_update_age_ms`` (optional, 0 = disabled) -> UPDATE_AGE
 * tick-by-tick BBO reference available (if required)                     -> BBO_UNAVAILABLE
 * |book top - BBO| <= ``bbo_tolerance_ticks`` on both sides              -> BBO_MISMATCH (grace, escalates)
 
@@ -82,6 +82,9 @@ class InvalidationReason(Enum):
     SESSION_CONFLICT = "session_conflict"      # 10197
     DATA_NOT_LIVE = "data_not_live"            # delayed / frozen market data
     BACKLOG = "backlog"                        # dispatch backlog overflow
+    DATA_ANOMALY = "data_anomaly"              # unusable depth row (off-grid price, bad code, fractional size)
+    SUBSCRIPTION_FAILED = "subscription_failed"  # depth subscription rejected / halted
+    INTERNAL_ERROR = "internal_error"
     MANUAL = "manual"
 
 
@@ -434,7 +437,9 @@ class OrderBook:
         # --- depth and freshness ---
         if len(bids) < cfg.min_valid_rows or len(asks) < cfg.min_valid_rows:
             issues.add(QualityIssue.INSUFFICIENT_DEPTH)
-        if self._last_update_ns is None or now - self._last_update_ns > self._max_age_ns:
+        # Optional (disabled by default, max_update_age_ms = 0): a quiet but correct book is not
+        # evidence of failure (C3 amendment B). Stream age is primarily telemetry.
+        if self._max_age_ns and (self._last_update_ns is None or now - self._last_update_ns > self._max_age_ns):
             issues.add(QualityIssue.UPDATE_AGE)
 
         # --- cross-check against tick-by-tick BBO ---

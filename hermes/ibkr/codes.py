@@ -49,7 +49,25 @@ MARKET_DATA_TYPE_DELAYED = 3
 MARKET_DATA_TYPE_DELAYED_FROZEN = 4
 
 # ---------------------------------------------------------------------------
-# Error / status codes handled explicitly (classification implemented in C3)
+# reqMktData (L1) tick types (ibapi.ticktype.TickTypeEnum; cross-checked by tests)
+# ---------------------------------------------------------------------------
+
+TICK_BID_SIZE = 0
+TICK_BID = 1
+TICK_ASK = 2
+TICK_ASK_SIZE = 3
+TICK_LAST = 4
+TICK_LAST_SIZE = 5
+TICK_HIGH = 6
+TICK_LOW = 7
+TICK_VOLUME = 8
+TICK_CLOSE = 9
+TICK_OPEN = 14
+# Delayed variants: receiving ANY of these means the data is NOT live.
+DELAYED_TICK_TYPES = frozenset(range(66, 77))
+
+# ---------------------------------------------------------------------------
+# Error / status codes handled explicitly (classification: hermes.ibkr.errors)
 # ---------------------------------------------------------------------------
 
 ERR_DEPTH_RESET = 317

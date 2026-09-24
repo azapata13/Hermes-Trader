@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from hermes.ibkr import codes
-from hermes.ibkr.raw_events import RawEvent, RawIbkrEvent, RawLocalEvent, RawMarketDepth, RawRecordingGap, RawTimerTick
+from hermes.ibkr.raw_events import RawEvent, RawIbkrEvent, RawLocalEvent, RawMarketDepth, RawTimerTick
 from hermes.market.events import BookSide, DepthOp, DepthRowEvent, MarketEvent, TradeEvent
 
 
@@ -35,9 +35,7 @@ def test_raw_events_hierarchy_and_immutability():
     raw = RawMarketDepth(seq=1, recv_mono_ns=5, recv_wall_ns=6, req_id=4001, position=0, operation=0,
                          side=1, price=21234.75, size=Decimal("3"), is_l2=False)
     assert isinstance(raw, RawIbkrEvent) and isinstance(raw, RawEvent)
-    assert isinstance(RawTimerTick(seq=2, recv_mono_ns=1, recv_wall_ns=1), RawLocalEvent)
-    gap = RawRecordingGap(seq=3, recv_mono_ns=1, recv_wall_ns=1, first_seq=10, last_seq=19, count=10)
-    assert gap.count == 10
+    assert isinstance(RawTimerTick(seq=2, recv_mono_ns=1, recv_wall_ns=1, due_mono_ns=1), RawLocalEvent)
     with pytest.raises(dataclasses.FrozenInstanceError):
         raw.price = 1.0  # type: ignore[misc]
 

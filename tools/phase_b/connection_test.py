@@ -1,13 +1,25 @@
+"""Phase B diagnostic — ported to ReadOnlyClient in C3 (no direct EClient use).
+
+Standalone script; run from the repository root:
+    python tools/phase_b/connection_test.py
+READ-ONLY: uses hermes.ibkr.readonly.ReadOnlyClient (order methods blocked in 3 layers).
+"""
+
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 import threading
 import time
 
-from ibapi.client import EClient
+from hermes.ibkr.readonly import ReadOnlyClient
 from ibapi.wrapper import EWrapper
 
 
-class HermesIBKR(EWrapper, EClient):
+class HermesIBKR(EWrapper):
     def __init__(self):
-        EClient.__init__(self, self)
+        EWrapper.__init__(self)
         self.connected_event = threading.Event()
 
     def nextValidId(self, orderId: int):
@@ -42,31 +54,32 @@ class HermesIBKR(EWrapper, EClient):
 
 def main():
     app = HermesIBKR()
+    client = ReadOnlyClient(app)  # the only permitted EClient (read-only guard)
 
     print("Connecting Hermes → TWS @ 127.0.0.1:7496...")
 
-    app.connect(
+    client.connect(
         "127.0.0.1",
         7496,
         clientId=101
     )
 
     api_thread = threading.Thread(
-        target=app.run,
+        target=client.run,
         daemon=True
     )
     api_thread.start()
 
     if not app.connected_event.wait(timeout=8):
         print("❌ Connection timeout")
-        app.disconnect()
+        client.disconnect()
         return
 
     time.sleep(2)
 
-    print(f"✅ API socket alive: {app.isConnected()}")
+    print(f"✅ API socket alive: {client.isConnected()}")
 
-    app.disconnect()
+    client.disconnect()
     api_thread.join(timeout=2)
 
     print("✅ Hermes ↔ IBKR connection test successful")

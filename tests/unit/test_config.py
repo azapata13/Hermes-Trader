@@ -63,7 +63,7 @@ def test_float_accepts_int():
     {"min_valid_rows": 0},
     {"depth_rows": 5, "min_valid_rows": 6},
     {"settle_ms": -1},
-    {"max_update_age_ms": 0},
+    {"max_update_age_ms": -1},
     {"escalate_after_ms": 100, "transient_grace_ms": 250},
 ])
 def test_book_validation(book):
@@ -89,3 +89,38 @@ def test_config_is_frozen():
     cfg = load_config()
     with pytest.raises(Exception):
         cfg.book.depth_rows = 3  # type: ignore[misc]
+
+
+def test_update_age_disabled_by_default():
+    # C3 amendment B: silence alone is not a failure; stream age is telemetry.
+    assert load_config().book.max_update_age_ms == 0
+
+
+def test_c3_sections_defaults():
+    cfg = load_config()
+    assert cfg.subscriptions.tick_by_tick_all_last and cfg.subscriptions.tick_by_tick_bid_ask
+    assert cfg.subscriptions.l1_market_data and not cfg.subscriptions.depth_smart
+    assert cfg.session.conflict_retry_interval_s == 30.0 and cfg.session.conflict_max_attempts == 3
+    assert cfg.recorder.directory == "~/hermes-data/recordings"
+    assert cfg.gateway.max_requests_per_second <= 10
+
+
+@pytest.mark.parametrize("data", [
+    {"session": {"conflict_max_attempts": 0}},
+    {"session": {"resync_min_interval_s": 0}},
+    {"session": {"reconnect_initial_backoff_s": 10.0, "reconnect_max_backoff_s": 5.0}},
+    {"gateway": {"max_requests_per_second": 0}},
+    {"recorder": {"ring_capacity": 4}},
+    {"recorder": {"directory": " "}},
+    {"telemetry": {"report_interval_s": 0}},
+    {"subscriptions": {"tick_by_tick_bid_ask": False}},   # BBO confirmation still required
+])
+def test_c3_validation(data):
+    with pytest.raises(ConfigError):
+        config_from_mapping(data)
+
+
+def test_bbo_optional_only_when_confirmation_disabled():
+    cfg = config_from_mapping({"subscriptions": {"tick_by_tick_bid_ask": False},
+                               "book": {"require_bbo_confirmation": False}})
+    assert not cfg.subscriptions.tick_by_tick_bid_ask

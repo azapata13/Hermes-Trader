@@ -1,3 +1,4 @@
 # Dev/test dependencies (ibapi 10.45.1 comes from the official TWS API distribution, not PyPI)
+-r requirements.txt
 pytest>=8
 hypothesis>=6.100
