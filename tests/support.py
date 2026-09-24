@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig
+from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.contracts import ContractSpec
 from hermes.ibkr.normalizer import Normalizer
@@ -88,10 +88,10 @@ class RawScript:
                         ask_price=ask, bid_size=Decimal(bid_size), ask_size=Decimal(ask_size),
                         bid_past_low=False, ask_past_high=False)
 
-    def trade(self, req_id: int, price: float, size=1):
+    def trade(self, req_id: int, price: float, size=1, past_limit=False, unreported=False, special=""):
         return self.add(R.RawTickByTickAllLast, req_id=req_id, tick_type=2, time=self.wall // 10**9,
-                        price=price, size=Decimal(size), past_limit=False, unreported=False,
-                        exchange="CME", special_conditions="")
+                        price=price, size=Decimal(size), past_limit=past_limit, unreported=unreported,
+                        exchange="CME", special_conditions=special)
 
     def mdt(self, req_id: int = L1, market_data_type: int = 1):
         return self.add(R.RawMarketDataType, req_id=req_id, market_data_type=market_data_type)
@@ -142,9 +142,10 @@ class Harness:
     """Normalizer + MarketEngine driven by raw events (what the live pipeline and replay do)."""
 
     def __init__(self, book: BookConfig | None = None, session: SessionConfig | None = None,
-                 subs: SubscriptionsConfig | None = None) -> None:
+                 subs: SubscriptionsConfig | None = None, tape: TapeConfig | None = None) -> None:
         self.normalizer = Normalizer()
-        self.engine = MarketEngine(book or BookConfig(), session or SessionConfig(), subs or SubscriptionsConfig())
+        self.engine = MarketEngine(book or BookConfig(), session or SessionConfig(), subs or SubscriptionsConfig(),
+                                   tape_cfg=tape)
         self.market_events = []
 
     def feed(self, raws) -> "Harness":

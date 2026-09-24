@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from hermes.market.events import ConnectionState, Stream, StreamStatus
 from hermes.market.orderbook import BookSnapshot
+from hermes.market.tape import TapeSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class InstrumentSnapshot:
     streams: tuple[StreamSnapshot, ...]
     market_data_ok: bool
     not_ok_reasons: tuple[str, ...]
+    tape: TapeSnapshot | None = None   # C4 compact view (latest N trades + totals), never the full tape
 
 
 @dataclass(frozen=True, slots=True)

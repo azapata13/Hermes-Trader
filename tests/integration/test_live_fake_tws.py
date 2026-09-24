@@ -94,7 +94,7 @@ def assert_no_forbidden_messages(tws):
 def assert_replay_equivalent(rt):
     ver = verify_session(rt.recorder.session_dir)
     assert ver.replay_complete, ver.problems
-    h = Harness(rt.cfg.book, rt.cfg.session, rt.cfg.subscriptions).feed(iter_raw_events(rt.recorder.session_dir))
+    h = Harness(rt.cfg.book, rt.cfg.session, rt.cfg.subscriptions, rt.cfg.tape).feed(iter_raw_events(rt.recorder.session_dir))
     assert h.engine.snapshot() == rt.engine.snapshot()        # deterministic live/replay equivalence
     return ver
 
@@ -111,6 +111,9 @@ def test_healthy_session_records_and_replays(tws, tmp_path):
     assert ver.counts_by_type["RawRequestIssued"] >= 7 and ver.counts_by_type["RawTimerTick"] >= 1
     rep = rt.reporter.last_report
     assert rep["readonly_violations"] == 0 and rep["pipeline"]["internal_errors"] == 0
+    # C4: the fake's AllLast print at the bid is classified SELL from the prevailing BidAsk quote
+    t = rt.engine.instruments[1].tape.trades()
+    assert t and t[0].aggressor.value == "sell" and t[0].method.value == "direct_quote"
 
 
 def test_317_resync_and_late_old_generation_callbacks(tws, tmp_path):

@@ -114,6 +114,22 @@ class TelemetryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TapeConfig:
+    max_trades: int = 50_000               # tape bound by count
+    max_age_s: float = 1800.0              # tape bound by age (event time)
+    quote_history: int = 64                # BidAsk states kept for quote-move ambiguity checks
+    ambiguity_window_ms: int = 50          # PROVISIONAL C4 baseline (not optimized); recalibrate on real sessions
+    max_quote_age_ms: int = 0              # 0 = disabled (a quiet BBO is legitimate)
+    snapshot_trades: int = 20              # latest N trades exposed per snapshot
+    confidence_direct_quote: float = 1.0          # deterministic RANKS, not probabilities
+    confidence_historical_quote: float = 0.6
+    confidence_tick_rule: float = 0.3
+    allowed_special_conditions: str = ""   # comma separated; others => UNKNOWN(INELIGIBLE)
+    classify_past_limit: bool = False
+    classify_unreported: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class HermesConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     ibkr: IbkrConfig = field(default_factory=IbkrConfig)
@@ -124,6 +140,7 @@ class HermesConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
+    tape: TapeConfig = field(default_factory=TapeConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -136,6 +153,7 @@ _SECTIONS: dict[str, type] = {
     "gateway": GatewayConfig,
     "recorder": RecorderConfig,
     "telemetry": TelemetryConfig,
+    "tape": TapeConfig,
 }
 
 
@@ -241,6 +259,14 @@ def _validate(cfg: HermesConfig) -> None:
     t = cfg.telemetry
     if t.report_interval_s <= 0 or t.snapshot_interval_ms < 1:
         raise ConfigError("[telemetry] intervals must be > 0")
+
+    tp = cfg.tape
+    if tp.max_trades < 1 or tp.max_age_s <= 0 or tp.quote_history < 2 or tp.snapshot_trades < 0:
+        raise ConfigError("[tape] bounds out of range (max_trades >= 1, max_age_s > 0, quote_history >= 2)")
+    if tp.ambiguity_window_ms < 0 or tp.max_quote_age_ms < 0:
+        raise ConfigError("[tape] windows must be >= 0")
+    if not (1.0 >= tp.confidence_direct_quote >= tp.confidence_historical_quote >= tp.confidence_tick_rule > 0.0):
+        raise ConfigError("[tape] confidences must satisfy 1 >= quote >= quote_history >= tick_rule > 0")
 
     sub = cfg.subscriptions
     if cfg.book.require_bbo_confirmation and not sub.tick_by_tick_bid_ask:

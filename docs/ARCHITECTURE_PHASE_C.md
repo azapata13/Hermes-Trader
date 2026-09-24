@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (pending live smoke test on the Mac) · C4+ not started.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5+ not started.
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -198,7 +198,26 @@ resets the book (new epoch) deterministically via the recorded request.
 
 ---
 
-## 8. Tape, classification, bars, metrics (C4–C8, unchanged plan)
+## 8. C4 — Tape and aggressor classification (implemented)
+
+`hermes/market/classify.py` (TradeClassifier), `hermes/market/tape.py` (bounded Tape), config `[tape]`.
+Rules (first match wins): ineligible print (unreported / pastLimit / special condition not allowlisted / size ≤ 0)
+→ UNKNOWN(INELIGIBLE), never updates tick state · invalid context (connection, farm, 10197, not live, BBO stream
+not ACTIVE/erroring) → UNKNOWN(INVALID_CONTEXT) · no two-sided quote of the active BBO generation → UNKNOWN(NO_QUOTE)
+· optional quote age → UNKNOWN(STALE_QUOTE) · locked/crossed quote → UNKNOWN · price ≥ ask → BUY / ≤ bid → SELL
+(DIRECT_QUOTE, 1.0) unless a prior quote within `ambiguity_window_ms` (default **50 ms — provisional C4 baseline from one real MNQ session, not optimized; to be recalibrated on multiple sessions**) puts it on the other side: only the other side →
+that side (HISTORICAL_QUOTE, 0.6: quote update overtook the trade callback); both sides → UNKNOWN(AMBIGUOUS) · inside
+spread: single-sided history → HISTORICAL_QUOTE, both → AMBIGUOUS, else tick rule (TICK_RULE, 0.3) or
+UNKNOWN(NO_TICK_REFERENCE). Confidences are deterministic ranks, not probabilities. Quote history is per BBO
+generation; tick state per trades generation; both reset on continuity breaks (resubscribe, disconnect/1100/1101,
+farm broken, 10197, not live) which also start a new tape epoch (prints are kept). Tape bounded by count and age
+(event time). Three distinctly named totals, each with BUY/SELL/UNKNOWN separate and `known_delta` excluding UNKNOWN: `retained_window` (bounded tape), `epoch_cumulative` (since the current tape epoch), `session_cumulative` (since process start). Every quote-based classification records `ref_quote_age_ns` (age of the quote actually used) for calibration.
+Snapshots carry a compact `TapeSnapshot` (latest N, totals, context, classifier state); tape/classifier state is
+part of `state_token`, so resets publish immediately. `tools/tape_report.py` replays a recording to calibrate
+`ambiguity_window_ms`. Known limitation: a genuine print on the new side of a level that flipped within the
+window is labelled with the older side at reduced confidence.
+
+## 8b. Bars, metrics (C5–C8, unchanged plan)
 
 Tape (bounded, BUY/SELL/UNKNOWN with method + confidence; delta split buy/sell/unknown),
 fill-vs-cancel attribution window, bars 30 s/1 m/5 m (UTC aligned, closed by clock ticks —
@@ -310,7 +329,7 @@ tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (
 
 ## 15. Milestones
 
-C1 ✅ · C2 ✅ · C3 ✅ (live validation pending) · C4 BBO/tape/classifier · C5 bars/session (tick
+C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ tape/classifier · C5 bars/session (tick
 precision) · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
 hardening/soak.
 

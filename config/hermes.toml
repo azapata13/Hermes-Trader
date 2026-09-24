@@ -80,3 +80,20 @@ report_interval_s = 10.0
 log_directory = "~/hermes-data/logs"
 snapshot_interval_ms = 100
 console = true
+
+[tape]
+# C4 Time & Sales / aggressor classification. Confidences are deterministic RANKS, not probabilities.
+max_trades = 50000
+max_age_s = 1800.0
+quote_history = 64
+ambiguity_window_ms = 50         # PROVISIONAL C4 baseline from one real MNQ session (0 ms overconfident, >=250 ms
+                                 # admits stale quotes). NOT optimized/final: recalibrate on multiple sessions
+                                 # with tools/tape_report.py. Prior quotes this recent may explain a print.
+max_quote_age_ms = 0             # 0 = disabled: a quiet BBO is legitimate (amendment B)
+snapshot_trades = 20
+confidence_direct_quote = 1.0
+confidence_historical_quote = 0.6
+confidence_tick_rule = 0.3
+allowed_special_conditions = ""  # comma separated; any other condition => UNKNOWN(INELIGIBLE)
+classify_past_limit = false
+classify_unreported = false

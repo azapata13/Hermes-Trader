@@ -124,3 +124,13 @@ def test_bbo_optional_only_when_confirmation_disabled():
     cfg = config_from_mapping({"subscriptions": {"tick_by_tick_bid_ask": False},
                                "book": {"require_bbo_confirmation": False}})
     assert not cfg.subscriptions.tick_by_tick_bid_ask
+
+
+def test_tape_defaults_and_validation():
+    t = load_config().tape
+    assert (t.max_trades, t.max_age_s, t.max_quote_age_ms) == (50_000, 1800.0, 0)
+    assert t.confidence_direct_quote > t.confidence_historical_quote > t.confidence_tick_rule > 0
+    for bad in ({"max_trades": 0}, {"max_age_s": 0}, {"quote_history": 1}, {"ambiguity_window_ms": -1},
+                {"confidence_tick_rule": 0.9}, {"confidence_direct_quote": 1.5}, {"snapshot_trades": -1}):
+        with pytest.raises(ConfigError):
+            config_from_mapping({"tape": bad})

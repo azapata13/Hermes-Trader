@@ -76,7 +76,7 @@ class LiveRuntime:
         self.telemetry = Telemetry()
         self.publisher = SnapshotPublisher()
         self.normalizer = Normalizer()
-        self.engine = MarketEngine(cfg.book, cfg.session, cfg.subscriptions)
+        self.engine = MarketEngine(cfg.book, cfg.session, cfg.subscriptions, tape_cfg=cfg.tape)
         self.recorder = Recorder(cfg.recorder, build_meta(cfg)) if (record and cfg.recorder.enabled) else None
         self.pipeline = RawPipeline(self.normalizer, self.engine, self.telemetry, self.publisher, self.recorder,
                                     tick_interval_ns=cfg.session.clock_tick_interval_ms * 1_000_000,
@@ -172,7 +172,18 @@ class LiveRuntime:
                     "con_id": i.con_id, "contract": i.contract_state, "market_data_ok": i.market_data_ok,
                     "not_ok_reasons": list(i.not_ok_reasons), "market_data_type": i.market_data_type,
                     "book": book, "streams": streams,
-                    "last_trade": _fmt_price(i.last_trade.price_units, grid) if i.last_trade else None}
+                    "last_trade": _fmt_price(i.last_trade.price_units, grid) if i.last_trade else None,
+                    "tape": None if i.tape is None else {
+                        "size": i.tape.size, "epoch": i.tape.epoch, "context_ok": i.tape.context_ok,
+                        "context": i.tape.context_reason,
+                        # retained_window totals (bounded tape); epoch/session cumulative reported separately
+                        "buy_vol": i.tape.retained_window.buy_volume, "sell_vol": i.tape.retained_window.sell_volume,
+                        "unknown_vol": i.tape.retained_window.unknown_volume,
+                        "known_delta": i.tape.retained_window.known_delta,
+                        "by_method": dict(i.tape.retained_window.by_method),
+                        "epoch_cumulative": dataclasses.asdict(i.tape.epoch_cumulative),
+                        "session_cumulative": dataclasses.asdict(i.tape.session_cumulative),
+                        "last": i.tape.last_aggressor.value if i.tape.last_aggressor else None}}
             rep["instruments"] = insts
         rep["latency_us"] = self.telemetry.swap_latencies()
         if self.recorder is not None:
@@ -216,6 +227,12 @@ class LiveRuntime:
             parts.append(f"cb p50/p99={cb['p50']}/{cb['p99']}us")
         if core:
             parts.append(f"core p99={core['p99']}us")
+        trade = lat.get("trade_classify_tape")
+        for i in (rep.get("instruments") or {}).values():
+            t = i.get("tape")
+            if t:
+                parts.append(f"tape n={t['size']} B/S/U={t['buy_vol']}/{t['sell_vol']}/{t['unknown_vol']}"
+                             + (f" cls p99={trade['p99']}us" if trade else ""))
         r = rep.get("recorder")
         if r:
             parts.append(f"rec backlog={r['backlog']} drops={r['dropped_overflow']} gaps={r['gaps_written']}")

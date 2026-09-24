@@ -33,7 +33,7 @@ from ibapi.wrapper import EWrapper
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.normalizer import Normalizer
 from hermes.market.engine import MarketEngine
-from hermes.market.events import MarketEvent
+from hermes.market.events import MarketEvent, TradeEvent
 from hermes.market.snapshot import SnapshotPublisher
 
 log = logging.getLogger("hermes.pipeline")
@@ -163,7 +163,10 @@ class RawPipeline:
             for ev in events:
                 t2 = _mono()
                 eng.on_event(ev)
-                tel.observe("engine_event", _mono() - t2)
+                dt = _mono() - t2
+                tel.observe("engine_event", dt)
+                if type(ev) is TradeEvent:
+                    tel.observe("trade_classify_tape", dt)     # C4: classification + tape update
             tel.observe("core_total", _mono() - t0)
         except SingleWriterViolation:
             raise

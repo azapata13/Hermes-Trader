@@ -6,7 +6,8 @@ the same Normalizer + MarketEngine reproduces identical state.
 
 C3 scope: order book, BBO, last trade, L1 cross-check state, stream/subscription health,
 connection / farm / market-data blocks, bounded 10197 recovery, critical alerts, snapshots.
-Tape, bars and order-flow metrics arrive in C4+.
+C4: bounded classified trade tape (hermes.market.tape / classify). Bars and order-flow
+metrics arrive in C5+.
 
 Single writer: an optional ``owner_guard`` callable (installed by the live pipeline) raises if
 ``on_event`` is called from any thread other than the current dispatch owner.
@@ -17,13 +18,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig
+from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
 from hermes.ibkr.errors import SUBSCRIPTION_FATAL
 from hermes.market import events as M
 from hermes.market.events import AnomalyKind, ConnectionState, ErrorClass, Stream, StreamStatus
+from hermes.market.classify import QuoteState, TradeClassifier
 from hermes.market.health import ConflictPhase, ConflictRecovery, StreamState
 from hermes.market.orderbook import BookState, InvalidationReason, OrderBook
 from hermes.market.pricegrid import PriceGrid
+from hermes.market.tape import ClassifiedTrade, Tape, TapeSnapshot
 from hermes.market.snapshot import (
     BboSnapshot,
     InstrumentSnapshot,
@@ -96,12 +99,15 @@ class InstrumentState:
     market_data_type: int | None = None     # for the active L1 generation
     mdt_generation: int | None = None
     l1: dict[M.L1Field, int] = field(default_factory=dict)
+    tape: Tape | None = None
+    classifier: TradeClassifier | None = None
 
 
 class MarketEngine:
     def __init__(self, book_cfg: BookConfig, session_cfg: SessionConfig, sub_cfg: SubscriptionsConfig,
-                 owner_guard: Callable[[], None] | None = None) -> None:
+                 owner_guard: Callable[[], None] | None = None, tape_cfg: TapeConfig | None = None) -> None:
         self._book_cfg = book_cfg
+        self._tape_cfg = tape_cfg or TapeConfig()
         self._required = required_streams(sub_cfg)
         self._owner_guard = owner_guard
         self.instruments: dict[int, InstrumentState] = {}
@@ -166,7 +172,8 @@ class MarketEngine:
     def instrument(self, instrument_id: int) -> InstrumentState:
         inst = self.instruments.get(instrument_id)
         if inst is None:
-            inst = InstrumentState(instrument_id, self._required, {s: StreamState(s) for s in MARKET_STREAMS})
+            inst = InstrumentState(instrument_id, self._required, {s: StreamState(s) for s in MARKET_STREAMS},
+                                   tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg))
             self.instruments[instrument_id] = inst
         return inst
 
@@ -208,11 +215,28 @@ class MarketEngine:
         inst.bbo = BboSnapshot(ev.bid_units, ev.ask_units, ev.bid_size, ev.ask_size, ev.exch_ts_s, ev.recv_mono_ns)
         if inst.book is not None:
             inst.book.on_bbo(ev.bid_units, ev.ask_units, ev.recv_mono_ns)
+        inst.classifier.on_quote(QuoteState(ev.bid_units, ev.ask_units, ev.bid_size, ev.ask_size, ev.seq,  # type: ignore[union-attr]
+                                            ev.generation, ev.recv_mono_ns, ev.recv_wall_ns, ev.exch_ts_s))
 
     def _on_trade(self, ev: M.TradeEvent) -> None:
         inst = self.instruments[ev.instrument_id]
         inst.streams[Stream.TRADES].on_data(ev.recv_mono_ns)
         inst.last_trade = TradeSnapshot(ev.price_units, ev.size, ev.exch_ts_s, ev.recv_mono_ns)
+        ok, _ = self.classification_context(inst)
+        c = inst.classifier.classify(ev.price_units, ev.size, ev.past_limit, ev.unreported,  # type: ignore[union-attr]
+                                     ev.special_conditions, ev.generation, ev.recv_mono_ns, ok)
+        q = c.quote
+        inst.tape.append(ClassifiedTrade(  # type: ignore[union-attr]
+            instrument_id=ev.instrument_id, seq=ev.seq, generation=ev.generation, tape_epoch=inst.tape.epoch,  # type: ignore[union-attr]
+            exch_ts_s=ev.exch_ts_s, recv_mono_ns=ev.recv_mono_ns, recv_wall_ns=ev.recv_wall_ns,
+            price_units=ev.price_units, size=ev.size, exchange=ev.exchange,
+            special_conditions=ev.special_conditions, past_limit=ev.past_limit, unreported=ev.unreported,
+            eligible=c.eligible, aggressor=c.aggressor, method=c.method, confidence=c.confidence,
+            unknown_reason=c.reason, quote_bid_units=q.bid_units if q else None,
+            quote_ask_units=q.ask_units if q else None, quote_seq=q.seq if q else None,
+            ref_quote_seq=c.ref_quote_seq,
+            book_valid=inst.book is not None and inst.book.state is BookState.VALID,
+            ref_quote_age_ns=c.ref_quote_age_ns))
         b = inst.bbo
         # Cross-stream evidence (telemetry only): a trade >= 2 units outside a BBO that has not
         # changed for > 2 s suggests the BBO stream may be frozen. Not a verdict by itself.
@@ -245,6 +269,33 @@ class MarketEngine:
         for inst in self.instruments.values():
             if inst.book is not None:
                 inst.book.invalidate(InvalidationReason.DATA_NOT_LIVE, now)
+        self._break_tape_continuity()
+
+    def _break_tape_continuity(self) -> None:
+        """Classifier state (quotes, tick reference) is no longer trustworthy; trades already on the
+        tape are real prints and are kept, but a new tape epoch starts."""
+        for inst in self.instruments.values():
+            inst.classifier.reset_all()  # type: ignore[union-attr]
+            inst.tape.new_epoch()  # type: ignore[union-attr]
+
+    def classification_context(self, inst: InstrumentState) -> tuple[bool, str]:
+        """Can quote-based aggressor inference run right now? (C3 health rules + BBO stream)."""
+        if self.connection is not ConnectionState.CONNECTED:
+            return False, f"connection:{self.connection.value}"
+        if self.farm_broken:
+            return False, "farm:broken"
+        if self.conflict.active:
+            return False, "conflict_10197"
+        if self.not_live:
+            return False, "data:not_live"
+        st = inst.streams[Stream.BBO]
+        if st.generation is None:
+            return False, "bbo:not_subscribed"
+        if st.error_active:
+            return False, f"bbo:error_{st.last_error_code}"
+        if st.status is not StreamStatus.ACTIVE:
+            return False, f"bbo:{st.status.value}"
+        return True, "ok"
 
     # ================================================================== subscriptions
     def _on_subscription(self, ev: M.SubscriptionEvent) -> None:
@@ -258,8 +309,12 @@ class MarketEngine:
                 inst.book.reset(M.ResetReason.RESUBSCRIBE, ev.recv_mono_ns)
             elif ev.stream is Stream.BBO:
                 inst.bbo = None
+                inst.classifier.reset_quotes()  # type: ignore[union-attr]
                 if inst.book is not None:
                     inst.book.set_bbo_unavailable(ev.recv_mono_ns)
+            elif ev.stream is Stream.TRADES:
+                inst.classifier.reset_tick()  # type: ignore[union-attr]
+                inst.tape.new_epoch()  # type: ignore[union-attr]
             elif ev.stream is Stream.L1:
                 inst.market_data_type = None
                 inst.mdt_generation = None
@@ -269,9 +324,11 @@ class MarketEngine:
                 self.resubscribe_all_pending = False
         else:
             st.on_cancelled(ev.generation)
-            if ev.stream is Stream.BBO and inst.book is not None and st.generation is None:
+            if ev.stream is Stream.BBO and st.generation is None:
                 inst.bbo = None
-                inst.book.set_bbo_unavailable(ev.recv_mono_ns)
+                inst.classifier.reset_quotes()  # type: ignore[union-attr]
+                if inst.book is not None:
+                    inst.book.set_bbo_unavailable(ev.recv_mono_ns)
 
     def _on_request_failed(self, ev: M.RequestFailedEvent) -> None:
         if ev.stream in MARKET_STREAMS:
@@ -282,6 +339,8 @@ class MarketEngine:
                 self._stream_unusable(inst, ev.stream, ev.recv_mono_ns)  # type: ignore[arg-type]
 
     def _stream_unusable(self, inst: InstrumentState, stream: Stream, now: int) -> None:
+        if stream is Stream.BBO:
+            inst.classifier.reset_quotes()  # type: ignore[union-attr]
         if inst.book is None:
             return
         if stream is Stream.DEPTH:
@@ -299,6 +358,7 @@ class MarketEngine:
         if cls is ErrorClass.CONNECTIVITY_LOST:
             self.connection = ConnectionState.LOST
             self._invalidate_books(InvalidationReason.DISCONNECT, now)
+            self._break_tape_continuity()
         elif cls is ErrorClass.RESTORED_DATA_KEPT:
             self.connection = ConnectionState.CONNECTED
             self.farm_broken = False
@@ -306,17 +366,20 @@ class MarketEngine:
             self.connection = ConnectionState.CONNECTED
             self.farm_broken = False
             self._invalidate_books(InvalidationReason.DATA_LOST, now)
+            self._break_tape_continuity()
             self.resubscribe_all_pending = True
             self._resubscribe_all_seq = ev.seq
             self.counters.resubscribe_all_requests += 1
         elif cls in (ErrorClass.FARM_BROKEN, ErrorClass.SERVER_CONNECTIVITY_BROKEN):
             self.farm_broken = True
             self._invalidate_books(InvalidationReason.DATA_LOST, now)
+            self._break_tape_continuity()
         elif cls is ErrorClass.FARM_OK:
             self.farm_broken = False
         elif cls is ErrorClass.SESSION_CONFLICT:
             self.conflict.on_conflict(ev.seq)
             self._invalidate_books(InvalidationReason.SESSION_CONFLICT, now)
+            self._break_tape_continuity()
             self._conflict_alert()
         elif cls is ErrorClass.DATA_NOT_LIVE:
             self._set_not_live(ev.seq, now)
@@ -343,6 +406,7 @@ class MarketEngine:
         elif ev.state is ConnectionState.CLOSED:
             self.connection = ConnectionState.CLOSED
             self._invalidate_books(InvalidationReason.DISCONNECT, ev.recv_mono_ns)
+            self._break_tape_continuity()
             for inst in self.instruments.values():
                 for st in inst.streams.values():
                     st.generation = None
@@ -364,6 +428,7 @@ class MarketEngine:
         for inst in self.instruments.values():
             if inst.book is not None:
                 inst.book.evaluate(now)
+            inst.tape.evict_by_age(now)  # type: ignore[union-attr]
         before = self.conflict.phase
         self.conflict.on_tick(now)
         if before is not self.conflict.phase:
@@ -533,9 +598,33 @@ class MarketEngine:
                 inst.instrument_id, inst.contract_state, inst.market_data_type, inst.mdt_generation,
                 (b.state, b.epoch, b.needs_resync, b.issues) if b is not None else None,
                 tuple((st.generation, st.status, st.error_active) for st in inst.streams.values()),
+                self._tape_token(inst),
             ))
         return (self.connection, self.farm_broken, self.not_live, self.conflict.phase, self.conflict.attempts,
                 self.resubscribe_all_pending, tuple(self.alerts), tuple(insts))
+
+    def _tape_token(self, inst: InstrumentState) -> tuple:
+        cl = inst.classifier
+        q = cl.current_quote  # type: ignore[union-attr]
+        return (inst.tape.epoch, cl.epoch, self.classification_context(inst)[0],  # type: ignore[union-attr]
+                q is not None and q.two_sided)
+
+    def tape_snapshot(self, inst: InstrumentState) -> TapeSnapshot:
+        tape, cl = inst.tape, inst.classifier
+        last = tape.last()  # type: ignore[union-attr]
+        ok, why = self.classification_context(inst)
+        q = cl.current_quote  # type: ignore[union-attr]
+        return TapeSnapshot(
+            size=len(tape), epoch=tape.epoch, classifier_epoch=cl.epoch,  # type: ignore[arg-type,union-attr]
+            retained_window=tape.retained_window.frozen(),  # type: ignore[union-attr]
+            epoch_cumulative=tape.epoch_cumulative.frozen(),  # type: ignore[union-attr]
+            session_cumulative=tape.session_cumulative.frozen(),  # type: ignore[union-attr]
+            latest=tape.latest(self._tape_cfg.snapshot_trades),  # type: ignore[union-attr]
+            last_aggressor=last.aggressor if last else None, last_method=last.method if last else None,
+            last_confidence=last.confidence if last else None, context_ok=ok, context_reason=why,
+            has_quote=q is not None and q.two_sided, quote_bid_units=q.bid_units if q else None,
+            quote_ask_units=q.ask_units if q else None, tick_direction=cl.tick_direction,  # type: ignore[union-attr]
+            evicted_by_count=tape.evicted_by_count, evicted_by_age=tape.evicted_by_age)  # type: ignore[union-attr]
 
     def snapshot(self) -> MarketSnapshot:
         insts = []
@@ -550,7 +639,8 @@ class MarketEngine:
                 contract_state=inst.contract_state,
                 book=inst.book.snapshot() if inst.book is not None else None,
                 bbo=inst.bbo, last_trade=inst.last_trade, market_data_type=inst.market_data_type,
-                streams=streams, market_data_ok=not reasons, not_ok_reasons=tuple(reasons)))
+                streams=streams, market_data_ok=not reasons, not_ok_reasons=tuple(reasons),
+                tape=self.tape_snapshot(inst)))
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,
