@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5+ not started.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6+ not started.
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -217,6 +217,48 @@ part of `state_token`, so resets publish immediately. `tools/tape_report.py` rep
 `ambiguity_window_ms`. Known limitation: a genuine print on the new side of a level that flipped within the
 window is labelled with the older side at reduced confidence.
 
+## 8a. C5 — Bars and session context (implemented)
+
+`hermes/market/bars.py` (BarEngine), `hermes/market/sessions.py` (SessionCalendar, SessionTracker), config `[bars]`.
+
+- **Canonical 30 s bars** from `ClassifiedTrade`; **1 m only from completed 30 s bars, 5 m only from completed
+  1 m bars**. Exact integer consistency at every level (OHLC, volume, trades, buy/sell/unknown volume,
+  `known_delta`, `vwap_num = Σ price_units·size`, first/last seq, flags ORed). EMPTY children never contribute
+  OHLC, so aggregates equal a direct computation from the prints (tested).
+- **Time basis:** membership by exchange timestamp (1 s resolution; receive wall time only if missing), bars
+  aligned to the UTC epoch, a print at `:30` belongs to the next bar. **Closing** by an event-time watermark =
+  max recorded `recv_wall_ns` (no clock read), evaluated on clock tick / heartbeat / control / connection / error /
+  subscription / trade events (never on depth/BBO/L1). Final once watermark ≥ `end + close_grace_ms`
+  (**500 ms, provisional**). Close latency ≈ grace + tick spacing (≤ 250 ms while callbacks flow, ≤ ~1 s heartbeat).
+  Requires an NTP-synced host clock; skew shows up as late prints (calibrate with `tools/bar_report.py --grace-ms`).
+- **Late prints** (bar already final) never rewrite it and are never moved to a later bar: counted
+  (trades/volume) and `LATE_DATA_OBSERVED` on the bar forming at that moment.
+- **Empty bars** (flat at the last price, `EMPTY`) only inside an active trading session and after the first
+  price. Closures (weekend, daily maintenance) and an unknown/expired calendar produce **no** bars.
+- **Flags** (sticky, ORed upward): EMPTY, FORMING (snapshots), PARTIAL (interval not fully observed: startup,
+  missing children), DATA_GAP, MARKET_DATA_INVALID, CONNECTION_INTERRUPTION, LATE_DATA_OBSERVED, SESSION_BOUNDARY.
+  Outage condition (after the first trades subscription): connection not CONNECTED ⇒ CONN+GAP+INVALID; farm
+  broken / 10197 / not live / trades stream error or unsubscribed ⇒ GAP+INVALID; every bar overlapping the
+  condition is flagged (empty outage bars too); continuity breaks and trades RE-subscriptions flag the bar
+  forming then. A closure is not a gap; reconnect never cleans a flag.
+- **BarEligibilityPolicy** (independent of classifier eligibility): pastLimit, unreported and non-allowlisted
+  special conditions are **excluded** by default (conservative; counted per reason and per bar), size ≤ 0 always.
+  A classifier-ineligible print can be bar-eligible (volume counted as UNKNOWN).
+- **Sessions:** `tradingHours` (TradingSession) / `liquidHours` (RTH) parsed in `timeZoneId` with zoneinfo
+  (pinned `tzdata` preferred over the host DB); current + legacy formats, CLOSED days, midnight crossing.
+  DST: non-existent local times shift forward by the gap, ambiguous ones resolve inclusively (start = earlier,
+  end = later instant); both counted. Trading date = local date of the window's last second. 2026 spring/fall
+  fixtures tested. No `UserTradingWindow`.
+- **Session context** (bar-eligible, non-late prints ⇒ session volume == Σ bar volume): session O/H/L/last,
+  volume, integer VWAP; RTH O/H/L/volume/VWAP; overnight (pre-RTH part of the session) H/L/volume; previous
+  session H/L/C only if observed; `observed_from_open` / `gap_observed` flags; resets at the session boundary
+  (trade exchange time; watermark closes the context at end + grace).
+- Bounded histories per timeframe; `BarsSnapshot` / `SessionSnapshot` (forming 30 s/1 m/5 m, latest N,
+  counters, active flags) cached by version; bar completion, quality condition and session phase are part of
+  `state_token`. Replay reproduces identical bars (tested); live/replay equivalence end to end.
+- Known limitations: the calendar comes from one `reqContractDetails` per process (≈1 week horizon, beyond it
+  sessions are UNKNOWN until restart); outage flags use receive wall time while bars use exchange time.
+
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 
 Tape (bounded, BUY/SELL/UNKNOWN with method + confidence; delta split buy/sell/unknown),
@@ -308,9 +350,12 @@ hermes/
   ibkr/raw_events.py codes.py errors.py market_rules.py contracts.py normalizer.py
        readonly.py gateway.py adapter.py session.py
   market/events.py pricegrid.py orderbook.py health.py engine.py snapshot.py
+         classify.py tape.py (C4) bars.py sessions.py (C5)
   storage/codec.py recorder.py reader.py
   app/run_live.py              python -m hermes.app.run_live [--duration N]
 tools/inspect_recording.py     recording verification report
+tools/tape_report.py           C4 classifier calibration (ambiguity window)
+tools/bar_report.py            C5 bars / session report, close-grace calibration, per-stage costs
 tools/phase_b/*.py             Phase B diagnostics (ReadOnlyClient)
 config/hermes.toml
 tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (manual)
@@ -323,14 +368,15 @@ tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (
 - **C1/C2:** config, clock, PriceGrid, events, ReadOnlyClient (3 layers + latch), static scan, order book unit + property tests.
 - **C3:** error table, contract resolution, normalizer (mapping, anomalies, generations), engine (generations, silence ≠ failure, 317, 1100/1101, farm, rejections, delayed data, 10197 proven/timeout/exhausted/budget reset, owner guard, determinism), codec round-trip for every raw type, recorder (never blocks, overflow gaps, write-error gaps, undeclared gaps, truncation, rotation), inspect tool, gateway (ReadOnlyClient only, send timestamps before send, unique reqIds, local failure, rate limits), pipeline (sequencing, timer ticks, never raises, owner guard, concurrency), adapter signature conformance with EWrapper, latency histograms, **end-to-end against a fake TWS speaking the real ibapi 10.45 protobuf wire protocol** (healthy run + live/replay equivalence, 317 + resync + late old-generation callbacks, 10197 recovery, 10197 budget exhaustion, reconnect, connection refused, no order message ever sent).
 - **Live (manual):** `tests/live/test_live_smoke.py` / `python -m hermes.app.run_live --duration 60`.
-- **C4–C9:** as planned (tape/classifier, bars, metrics scenarios, full replay tool, soak).
+- **C4:** classifier rules, windows, eligibility, tape bounds/totals, engine integration.
+- **C5:** 30 s membership/closing/grace/late, empty bars vs closures/weekend, 1 m/5 m == direct computation, flags (disconnect, 10197, resubscribe, startup), eligibility, sessions (formats, invalid, aliases, DST 2026 spring/fall, ambiguous/nonexistent), session context/VWAP/previous, determinism, snapshots, bar_report.
+- **C6–C9:** as planned (full replay tool, metrics scenarios, soak).
 
 ---
 
 ## 15. Milestones
 
-C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ tape/classifier · C5 bars/session (tick
-precision) · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
+C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ tape/classifier · C5 ✅ bars/session · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
 hardening/soak.
 
 ---
@@ -344,3 +390,5 @@ hardening/soak.
 5. Behavior of subscriptions across 1101/1102 and farm 2103/2104 transitions.
 6. Real callback rates, `msg_queue` backlog, callback/core latency percentiles on the MacBook.
 7. Contract details for MNQ Dec 2026: `marketRuleIds`/`validExchanges` alignment, `minTick`, multiplier format.
+8. C5: exact `tradingHours`/`liquidHours`/`timeZoneId` strings for MNQ (format, horizon, holiday entries);
+   late-print rate vs `close_grace_ms`; frequency of AllLast `specialConditions`/pastLimit/unreported on MNQ.

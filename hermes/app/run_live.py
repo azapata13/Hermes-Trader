@@ -67,6 +67,39 @@ def _fmt_price(units: int | None, grid: Any) -> str:
     return f"{grid.to_price(units):.2f}" if grid is not None else str(units)
 
 
+def _bar_brief(b: Any, grid: Any) -> dict[str, Any] | None:
+    if b is None:
+        return None
+    return {"start_s": b.start_s, "o": _fmt_price(b.open, grid), "h": _fmt_price(b.high, grid),
+            "l": _fmt_price(b.low, grid), "c": _fmt_price(b.close, grid), "vol": b.volume,
+            "bsu": [b.buy_volume, b.sell_volume, b.unknown_volume], "delta": b.known_delta,
+            "flags": b.flags.name if b.flags else ""}
+
+
+def _bars_report(bs: Any, grid: Any) -> dict[str, Any] | None:
+    if bs is None:
+        return None
+    return {"completed": [bs.completed_30s, bs.completed_1m, bs.completed_5m],
+            "last_30s": _bar_brief(bs.latest_30s[0] if bs.latest_30s else None, grid),
+            "forming_30s": _bar_brief(bs.forming_30s, grid),
+            "late": [bs.late_trades, bs.late_volume], "excluded": [bs.excluded_trades, bs.excluded_volume],
+            "excluded_by_reason": dict(bs.excluded_by_reason), "empty_bars": bs.empty_bars,
+            "gap_bars": bs.gap_bars, "active_flags": bs.active_flags.name if bs.active_flags else ""}
+
+
+def _session_report(ss: Any, grid: Any) -> dict[str, Any] | None:
+    if ss is None:
+        return None
+    st = ss.session
+    return {"calendar_ok": ss.calendar_ok, "calendar_error": ss.calendar_error, "in_session": ss.in_trading_session,
+            "in_rth": ss.in_rth, "trading_date": ss.trading_date,
+            "vwap": _fmt_price(round(st.vwap_num / st.volume), grid) if st is not None and st.volume else None,
+            "high": _fmt_price(st.high, grid) if st else None, "low": _fmt_price(st.low, grid) if st else None,
+            "volume": st.volume if st else 0, "observed_from_open": ss.observed_from_open,
+            "gap_observed": ss.gap_observed, "previous": ss.previous is not None,
+            "outside_session": ss.trades_outside_session, "late_session": ss.late_session_trades}
+
+
 class LiveRuntime:
     """Wires the live C3 system together. Also used by the fake-TWS end-to-end tests."""
 
@@ -76,7 +109,7 @@ class LiveRuntime:
         self.telemetry = Telemetry()
         self.publisher = SnapshotPublisher()
         self.normalizer = Normalizer()
-        self.engine = MarketEngine(cfg.book, cfg.session, cfg.subscriptions, tape_cfg=cfg.tape)
+        self.engine = MarketEngine(cfg.book, cfg.session, cfg.subscriptions, tape_cfg=cfg.tape, bars_cfg=cfg.bars)
         self.recorder = Recorder(cfg.recorder, build_meta(cfg)) if (record and cfg.recorder.enabled) else None
         self.pipeline = RawPipeline(self.normalizer, self.engine, self.telemetry, self.publisher, self.recorder,
                                     tick_interval_ns=cfg.session.clock_tick_interval_ms * 1_000_000,
@@ -183,7 +216,9 @@ class LiveRuntime:
                         "by_method": dict(i.tape.retained_window.by_method),
                         "epoch_cumulative": dataclasses.asdict(i.tape.epoch_cumulative),
                         "session_cumulative": dataclasses.asdict(i.tape.session_cumulative),
-                        "last": i.tape.last_aggressor.value if i.tape.last_aggressor else None}}
+                        "last": i.tape.last_aggressor.value if i.tape.last_aggressor else None},
+                    "bars": _bars_report(i.bars, grid),
+                    "session": _session_report(i.session, grid)}
             rep["instruments"] = insts
         rep["latency_us"] = self.telemetry.swap_latencies()
         if self.recorder is not None:
@@ -233,6 +268,13 @@ class LiveRuntime:
             if t:
                 parts.append(f"tape n={t['size']} B/S/U={t['buy_vol']}/{t['sell_vol']}/{t['unknown_vol']}"
                              + (f" cls p99={trade['p99']}us" if trade else ""))
+        for i in (rep.get("instruments") or {}).values():
+            bb, ss = i.get("bars"), i.get("session")
+            if bb:
+                parts.append(f"bars30s={bb['completed'][0]} late={bb['late'][0]} gap={bb['gap_bars']}"
+                             + (f" FLAGS={bb['active_flags']}" if bb["active_flags"] else ""))
+            if ss and ss["calendar_ok"]:
+                parts.append(f"sess={ss['trading_date']}{'/RTH' if ss['in_rth'] else ''} vwap={ss['vwap']}")
         r = rep.get("recorder")
         if r:
             parts.append(f"rec backlog={r['backlog']} drops={r['dropped_overflow']} gaps={r['gaps_written']}")

@@ -1,4 +1,4 @@
-"""Immutable market snapshots (C3 subset) and the atomic snapshot publisher.
+"""Immutable market snapshots (C3 subset + C4 tape + C5 bars/session) and the atomic snapshot publisher.
 
 Snapshots are built on the dispatch thread (single writer) and published by reference swap;
 any thread may read ``SnapshotPublisher.latest()``. Strategy code (later) consumes snapshots,
@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from hermes.market.events import ConnectionState, Stream, StreamStatus
+from hermes.market.bars import BarsSnapshot
 from hermes.market.orderbook import BookSnapshot
+from hermes.market.sessions import SessionSnapshot
 from hermes.market.tape import TapeSnapshot
 
 
@@ -57,6 +59,8 @@ class InstrumentSnapshot:
     market_data_ok: bool
     not_ok_reasons: tuple[str, ...]
     tape: TapeSnapshot | None = None   # C4 compact view (latest N trades + totals), never the full tape
+    bars: BarsSnapshot | None = None   # C5 forming + latest N completed bars per timeframe, quality counters
+    session: SessionSnapshot | None = None   # C5 exchange session context (session / RTH / overnight / previous)
 
 
 @dataclass(frozen=True, slots=True)

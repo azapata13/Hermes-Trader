@@ -97,3 +97,17 @@ confidence_tick_rule = 0.3
 allowed_special_conditions = ""  # comma separated; any other condition => UNKNOWN(INELIGIBLE)
 classify_past_limit = false
 classify_unreported = false
+
+[bars]
+# C5 bars: canonical 30 s bars from classified trades (exchange timestamp, UTC-epoch aligned);
+# 1 m / 5 m are aggregated from COMPLETED 30 s / 1 m bars. Closing is event-time driven.
+enabled = true
+close_grace_ms = 500             # PROVISIONAL: final once event time passes end + grace; later prints = late
+history_30s = 2880               # completed bars kept per timeframe (FIFO)
+history_1m = 1440
+history_5m = 576
+snapshot_bars = 10
+# Bar eligibility is independent of [tape] classifier eligibility. Conservative defaults:
+include_past_limit = false
+include_unreported = false
+allowed_special_conditions = ""  # comma separated; other special conditions are excluded (counted)

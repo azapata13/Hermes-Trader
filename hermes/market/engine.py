@@ -6,8 +6,10 @@ the same Normalizer + MarketEngine reproduces identical state.
 
 C3 scope: order book, BBO, last trade, L1 cross-check state, stream/subscription health,
 connection / farm / market-data blocks, bounded 10197 recovery, critical alerts, snapshots.
-C4: bounded classified trade tape (hermes.market.tape / classify). Bars and order-flow
-metrics arrive in C5+.
+C4: bounded classified trade tape (hermes.market.tape / classify).
+C5: canonical 30 s bars + 1 m / 5 m aggregates (hermes.market.bars) and exchange session context
+(hermes.market.sessions), closed by an event-time watermark (max recorded ``recv_wall_ns``).
+Order-flow metrics arrive in C7+.
 
 Single writer: an optional ``owner_guard`` callable (installed by the live pipeline) raises if
 ``on_event`` is called from any thread other than the current dispatch owner.
@@ -18,14 +20,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
+from hermes.config import BarsConfig, BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
 from hermes.ibkr.errors import SUBSCRIPTION_FATAL
 from hermes.market import events as M
 from hermes.market.events import AnomalyKind, ConnectionState, ErrorClass, Stream, StreamStatus
+from hermes.market.bars import BarEngine, BarFlag, TradeDisposition
 from hermes.market.classify import QuoteState, TradeClassifier
 from hermes.market.health import ConflictPhase, ConflictRecovery, StreamState
 from hermes.market.orderbook import BookState, InvalidationReason, OrderBook
 from hermes.market.pricegrid import PriceGrid
+from hermes.market.sessions import SessionCalendar, SessionTracker
 from hermes.market.tape import ClassifiedTrade, Tape, TapeSnapshot
 from hermes.market.snapshot import (
     BboSnapshot,
@@ -48,6 +52,16 @@ _EVENT_STREAM: dict[type, Stream] = {
     M.L1TickEvent: Stream.L1,
     M.MarketDataTypeEvent: Stream.L1,
 }
+
+# Events that advance bar/session closing (event-time watermark). Depth/BBO/L1 never do (hot path).
+_BAR_CLOCK_EVENTS = frozenset({M.ClockTickEvent, M.HeartbeatEvent, M.ControlEvent, M.ConnectionEvent,
+                               M.ErrorEvent, M.TradeEvent, M.SubscriptionEvent})
+# Events after which the bar quality condition (outage flags) is re-evaluated.
+_BAR_STATE_EVENTS = frozenset({M.ClockTickEvent, M.ControlEvent, M.ConnectionEvent, M.ErrorEvent,
+                               M.SubscriptionEvent, M.RequestFailedEvent, M.MarketDataTypeEvent,
+                               M.DataAnomalyEvent})
+_GAP = BarFlag.DATA_GAP | BarFlag.MARKET_DATA_INVALID
+_CONN_GAP = _GAP | BarFlag.CONNECTION_INTERRUPTION
 
 _DEPTH_ANOMALIES = frozenset({AnomalyKind.OFF_GRID_PRICE, AnomalyKind.INVALID_CODE,
                               AnomalyKind.NON_INTEGRAL_SIZE, AnomalyKind.NO_PRICE_GRID})
@@ -101,13 +115,19 @@ class InstrumentState:
     l1: dict[M.L1Field, int] = field(default_factory=dict)
     tape: Tape | None = None
     classifier: TradeClassifier | None = None
+    bars: BarEngine | None = None
+    sessions: SessionTracker | None = None
 
 
 class MarketEngine:
     def __init__(self, book_cfg: BookConfig, session_cfg: SessionConfig, sub_cfg: SubscriptionsConfig,
-                 owner_guard: Callable[[], None] | None = None, tape_cfg: TapeConfig | None = None) -> None:
+                 owner_guard: Callable[[], None] | None = None, tape_cfg: TapeConfig | None = None,
+                 bars_cfg: BarsConfig | None = None) -> None:
         self._book_cfg = book_cfg
         self._tape_cfg = tape_cfg or TapeConfig()
+        self._bars_cfg = bars_cfg or BarsConfig()
+        self._bars_on = self._bars_cfg.enabled
+        self.bar_clock_ns = 0                    # event-time watermark: max recorded recv_wall_ns
         self._required = required_streams(sub_cfg)
         self._owner_guard = owner_guard
         self.instruments: dict[int, InstrumentState] = {}
@@ -156,15 +176,23 @@ class MarketEngine:
         self.last_seq = ev.seq
         self.last_mono_ns = ev.recv_mono_ns
         self.last_wall_ns = ev.recv_wall_ns
-        stream = _EVENT_STREAM.get(type(ev))
+        t = type(ev)
+        if self._bars_on:
+            if ev.recv_wall_ns > self.bar_clock_ns:
+                self.bar_clock_ns = ev.recv_wall_ns
+            if t in _BAR_CLOCK_EVENTS:
+                self._advance_bars()          # close due bars BEFORE applying this event
+        stream = _EVENT_STREAM.get(t)
         if stream is not None:
             inst = self.instruments.get(ev.instrument_id)
             if inst is None or inst.streams[stream].generation != ev.generation:
                 self.counters.stale_generation_rejected += 1     # old callback: never mutates state
                 return
-        handler = self._handlers.get(type(ev))
+        handler = self._handlers.get(t)
         if handler is not None:
             handler(ev)
+        if self._bars_on and t in _BAR_STATE_EVENTS:
+            self._update_bar_conditions()
         if self.conflict.phase is ConflictPhase.RECOVERING:
             self._check_recovery(ev)
 
@@ -173,7 +201,9 @@ class MarketEngine:
         inst = self.instruments.get(instrument_id)
         if inst is None:
             inst = InstrumentState(instrument_id, self._required, {s: StreamState(s) for s in MARKET_STREAMS},
-                                   tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg))
+                                   tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg),
+                                   bars=BarEngine(self._bars_cfg, instrument_id) if self._bars_on else None,
+                                   sessions=SessionTracker(self._bars_cfg.close_grace_ms))
             self.instruments[instrument_id] = inst
         return inst
 
@@ -196,6 +226,10 @@ class MarketEngine:
         inst.contract_state = "defined"
         if inst.book is None:
             inst.book = OrderBook(self._book_cfg, ev.instrument_id)
+        cal = SessionCalendar(ev.time_zone, ev.trading_hours, ev.liquid_hours)
+        inst.sessions.set_calendar(cal)  # type: ignore[union-attr]
+        if inst.bars is not None:
+            inst.bars.set_calendar(cal)
 
     # ================================================================== market data
     def _on_depth(self, ev: M.DepthRowEvent) -> None:
@@ -237,6 +271,12 @@ class MarketEngine:
             ref_quote_seq=c.ref_quote_seq,
             book_valid=inst.book is not None and inst.book.state is BookState.VALID,
             ref_quote_age_ns=c.ref_quote_age_ns))
+        bars = inst.bars
+        if bars is not None:
+            ts = ev.exch_ts_s if ev.exch_ts_s > 0 else ev.recv_wall_ns // _S
+            excl = bars.policy.evaluate(ev.size, ev.past_limit, ev.unreported, ev.special_conditions)
+            if bars.on_trade(ts, ev.price_units, ev.size, ev.seq, c.aggressor, excl) is TradeDisposition.INCLUDED:
+                inst.sessions.on_trade(ts, ev.price_units, ev.size)  # type: ignore[union-attr]
         b = inst.bbo
         # Cross-stream evidence (telemetry only): a trade >= 2 units outside a BBO that has not
         # changed for > 2 s suggests the BBO stream may be frozen. Not a verdict by itself.
@@ -271,12 +311,49 @@ class MarketEngine:
                 inst.book.invalidate(InvalidationReason.DATA_NOT_LIVE, now)
         self._break_tape_continuity()
 
-    def _break_tape_continuity(self) -> None:
+    def _break_tape_continuity(self, connection: bool = False) -> None:
         """Classifier state (quotes, tick reference) is no longer trustworthy; trades already on the
-        tape are real prints and are kept, but a new tape epoch starts."""
+        tape are real prints and are kept, but a new tape epoch starts. The bar forming now is
+        flagged (prints may be missing); the flag is sticky."""
         for inst in self.instruments.values():
             inst.classifier.reset_all()  # type: ignore[union-attr]
             inst.tape.new_epoch()  # type: ignore[union-attr]
+            self._bar_gap_mark(inst, _CONN_GAP if connection else _GAP)
+
+    # ================================================================== bars / sessions
+    def _bar_gap_mark(self, inst: InstrumentState, flags: BarFlag) -> None:
+        b = inst.bars
+        if b is not None and b.armed:
+            b.mark(self.bar_clock_ns, flags)
+            inst.sessions.mark_gap()  # type: ignore[union-attr]
+
+    def _advance_bars(self) -> None:
+        wm = self.bar_clock_ns
+        for inst in self.instruments.values():
+            if inst.bars is not None:
+                inst.bars.advance(wm)
+            inst.sessions.advance(wm)  # type: ignore[union-attr]
+
+    def bar_condition(self, inst: InstrumentState) -> BarFlag:
+        """Quality flags that apply to every bar overlapping the current moment (0 == trustworthy)."""
+        if self.connection is not ConnectionState.CONNECTED:
+            return _CONN_GAP
+        st = inst.streams[Stream.TRADES]
+        if (self.farm_broken or self.conflict.active or self.not_live or st.generation is None
+                or st.error_active):
+            return _GAP
+        return BarFlag.NONE
+
+    def _update_bar_conditions(self) -> None:
+        wm = self.bar_clock_ns
+        for inst in self.instruments.values():
+            b = inst.bars
+            if b is None or not b.armed:
+                continue
+            f = self.bar_condition(inst)
+            if f != b.cond_flags:
+                b.set_condition(f, wm)
+                inst.sessions.set_gap(bool(f))  # type: ignore[union-attr]
 
     def classification_context(self, inst: InstrumentState) -> tuple[bool, str]:
         """Can quote-based aggressor inference run right now? (C3 health rules + BBO stream)."""
@@ -315,6 +392,11 @@ class MarketEngine:
             elif ev.stream is Stream.TRADES:
                 inst.classifier.reset_tick()  # type: ignore[union-attr]
                 inst.tape.new_epoch()  # type: ignore[union-attr]
+                b = inst.bars
+                if b is not None:
+                    if b.armed:                  # RE-subscription: prints may have been missed
+                        self._bar_gap_mark(inst, BarFlag.DATA_GAP)
+                    b.armed = True
             elif ev.stream is Stream.L1:
                 inst.market_data_type = None
                 inst.mdt_generation = None
@@ -358,7 +440,7 @@ class MarketEngine:
         if cls is ErrorClass.CONNECTIVITY_LOST:
             self.connection = ConnectionState.LOST
             self._invalidate_books(InvalidationReason.DISCONNECT, now)
-            self._break_tape_continuity()
+            self._break_tape_continuity(connection=True)
         elif cls is ErrorClass.RESTORED_DATA_KEPT:
             self.connection = ConnectionState.CONNECTED
             self.farm_broken = False
@@ -366,7 +448,7 @@ class MarketEngine:
             self.connection = ConnectionState.CONNECTED
             self.farm_broken = False
             self._invalidate_books(InvalidationReason.DATA_LOST, now)
-            self._break_tape_continuity()
+            self._break_tape_continuity(connection=True)
             self.resubscribe_all_pending = True
             self._resubscribe_all_seq = ev.seq
             self.counters.resubscribe_all_requests += 1
@@ -406,7 +488,7 @@ class MarketEngine:
         elif ev.state is ConnectionState.CLOSED:
             self.connection = ConnectionState.CLOSED
             self._invalidate_books(InvalidationReason.DISCONNECT, ev.recv_mono_ns)
-            self._break_tape_continuity()
+            self._break_tape_continuity(connection=True)
             for inst in self.instruments.values():
                 for st in inst.streams.values():
                     st.generation = None
@@ -599,6 +681,8 @@ class MarketEngine:
                 (b.state, b.epoch, b.needs_resync, b.issues) if b is not None else None,
                 tuple((st.generation, st.status, st.error_active) for st in inst.streams.values()),
                 self._tape_token(inst),
+                inst.bars.token() if inst.bars is not None else None,
+                inst.sessions.token(),  # type: ignore[union-attr]
             ))
         return (self.connection, self.farm_broken, self.not_live, self.conflict.phase, self.conflict.attempts,
                 self.resubscribe_all_pending, tuple(self.alerts), tuple(insts))
@@ -640,7 +724,9 @@ class MarketEngine:
                 book=inst.book.snapshot() if inst.book is not None else None,
                 bbo=inst.bbo, last_trade=inst.last_trade, market_data_type=inst.market_data_type,
                 streams=streams, market_data_ok=not reasons, not_ok_reasons=tuple(reasons),
-                tape=self.tape_snapshot(inst)))
+                tape=self.tape_snapshot(inst),
+                bars=inst.bars.snapshot(self._bars_cfg.snapshot_bars) if inst.bars is not None else None,
+                session=inst.sessions.snapshot()))  # type: ignore[union-attr]
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,

@@ -94,7 +94,7 @@ def assert_no_forbidden_messages(tws):
 def assert_replay_equivalent(rt):
     ver = verify_session(rt.recorder.session_dir)
     assert ver.replay_complete, ver.problems
-    h = Harness(rt.cfg.book, rt.cfg.session, rt.cfg.subscriptions, rt.cfg.tape).feed(iter_raw_events(rt.recorder.session_dir))
+    h = Harness(rt.cfg.book, rt.cfg.session, rt.cfg.subscriptions, rt.cfg.tape, rt.cfg.bars).feed(iter_raw_events(rt.recorder.session_dir))
     assert h.engine.snapshot() == rt.engine.snapshot()        # deterministic live/replay equivalence
     return ver
 
@@ -114,6 +114,11 @@ def test_healthy_session_records_and_replays(tws, tmp_path):
     # C4: the fake's AllLast print at the bid is classified SELL from the prevailing BidAsk quote
     t = rt.engine.instruments[1].tape.trades()
     assert t and t[0].aggressor.value == "sell" and t[0].method.value == "direct_quote"
+    # C5: contract tradingHours/liquidHours arrive over the wire and parse into a valid calendar;
+    # the print is on a forming 30 s bar (replay equivalence above covers bars + session state)
+    inst = rt.engine.snapshot().instruments[0]
+    assert inst.session.calendar_ok and inst.session.time_zone == "US/Central"
+    assert inst.bars is not None and (inst.bars.forming_30s is not None or inst.bars.completed_30s >= 1)
 
 
 def test_317_resync_and_late_old_generation_callbacks(tws, tmp_path):

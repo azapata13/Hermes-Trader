@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
+from hermes.config import BarsConfig, BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.contracts import ContractSpec
 from hermes.ibkr.normalizer import Normalizer
@@ -28,6 +28,14 @@ class RawScript:
 
     def advance(self, ms: float) -> "RawScript":
         ns = int(ms * MS)
+        self.mono += ns
+        self.wall += ns
+        return self
+
+    def at(self, t_s: float) -> "RawScript":
+        """Move wall (and mono) time forward to absolute UTC epoch seconds ``t_s``."""
+        ns = round(t_s * 10**9) - self.wall
+        assert ns >= 0, "time only moves forward"
         self.mono += ns
         self.wall += ns
         return self
@@ -100,12 +108,13 @@ class RawScript:
         return self.add(R.RawTickPrice, req_id=req_id, tick_type=tick_type, price=price)
 
     # ---- composite scenarios ----
-    def bootstrap(self, depth=DEPTH, bbo=BBO, trades=TRADES, l1=L1):
-        """Connect, resolve contract, define the grid, subscribe all four streams."""
+    def bootstrap(self, depth=DEPTH, bbo=BBO, trades=TRADES, l1=L1, **contract):
+        """Connect, resolve contract, define the grid, subscribe all four streams.
+        ``contract`` overrides contract-details fields (e.g. trading_hours / liquid_hours)."""
         self.next_valid_id()
         self.request("reqMarketDataType", None, iid=0, market_data_type=1)
         self.request("reqContractDetails", CONTRACT, **dict(SPEC.to_params()))
-        self.contract_details()
+        self.contract_details(**contract)
         self.contract_end()
         self.request("reqMarketRule", None, rule_id=67)
         self.market_rule()
@@ -142,10 +151,11 @@ class Harness:
     """Normalizer + MarketEngine driven by raw events (what the live pipeline and replay do)."""
 
     def __init__(self, book: BookConfig | None = None, session: SessionConfig | None = None,
-                 subs: SubscriptionsConfig | None = None, tape: TapeConfig | None = None) -> None:
+                 subs: SubscriptionsConfig | None = None, tape: TapeConfig | None = None,
+                 bars: BarsConfig | None = None) -> None:
         self.normalizer = Normalizer()
         self.engine = MarketEngine(book or BookConfig(), session or SessionConfig(), subs or SubscriptionsConfig(),
-                                   tape_cfg=tape)
+                                   tape_cfg=tape, bars_cfg=bars)
         self.market_events = []
 
     def feed(self, raws) -> "Harness":

@@ -130,6 +130,19 @@ class TapeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BarsConfig:
+    enabled: bool = True
+    close_grace_ms: int = 500              # PROVISIONAL: a bar is final once event time passes end + grace
+    history_30s: int = 2880                # completed bars kept per timeframe (deterministic FIFO eviction)
+    history_1m: int = 1440
+    history_5m: int = 576
+    snapshot_bars: int = 10                # latest N completed bars per timeframe in snapshots
+    include_past_limit: bool = False       # bar eligibility (independent of [tape] classifier eligibility)
+    include_unreported: bool = False
+    allowed_special_conditions: str = ""   # comma separated; prints with other conditions are excluded
+
+
+@dataclass(frozen=True, slots=True)
 class HermesConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     ibkr: IbkrConfig = field(default_factory=IbkrConfig)
@@ -141,6 +154,7 @@ class HermesConfig:
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     tape: TapeConfig = field(default_factory=TapeConfig)
+    bars: BarsConfig = field(default_factory=BarsConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -154,6 +168,7 @@ _SECTIONS: dict[str, type] = {
     "recorder": RecorderConfig,
     "telemetry": TelemetryConfig,
     "tape": TapeConfig,
+    "bars": BarsConfig,
 }
 
 
@@ -267,6 +282,12 @@ def _validate(cfg: HermesConfig) -> None:
         raise ConfigError("[tape] windows must be >= 0")
     if not (1.0 >= tp.confidence_direct_quote >= tp.confidence_historical_quote >= tp.confidence_tick_rule > 0.0):
         raise ConfigError("[tape] confidences must satisfy 1 >= quote >= quote_history >= tick_rule > 0")
+
+    br = cfg.bars
+    if not (0 <= br.close_grace_ms <= 10_000):
+        raise ConfigError("[bars].close_grace_ms must be in [0, 10000]")
+    if min(br.history_30s, br.history_1m, br.history_5m) < 1 or br.snapshot_bars < 0:
+        raise ConfigError("[bars] history sizes must be >= 1 and snapshot_bars >= 0")
 
     sub = cfg.subscriptions
     if cfg.book.require_bbo_confirmation and not sub.tick_by_tick_bid_ask:

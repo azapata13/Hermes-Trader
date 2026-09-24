@@ -2,3 +2,5 @@
 # ibapi 10.45.1 is NOT on PyPI under that version: install it from the official TWS API
 # distribution (the PyPI package named "ibapi" is an unrelated, outdated upload).
 msgpack==1.2.2
+# Pinned IANA tz database: session calendars resolve identical DST offsets on every host.
+tzdata==2026.4

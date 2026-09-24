@@ -1,12 +1,12 @@
 [project]
 name = "hermes-trading"
-version = "0.4.0"
+version = "0.5.0"
 description = "Hermès — MNQ order-flow trading assistant (Phase C: market intelligence, read-only)"
 requires-python = ">=3.11"
 # Runtime dependency NOT resolvable from PyPI:
 #   ibapi == 10.45.1, installed from the official TWS API distribution
 #   (the PyPI package named "ibapi" is an unrelated, outdated upload — never pip install it).
-dependencies = ["msgpack==1.2.2"]
+dependencies = ["msgpack==1.2.2", "tzdata==2026.4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6.100"]
