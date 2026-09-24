@@ -61,7 +61,7 @@ class Run:
         return self.summary
 
 
-def wait_for(pred, timeout=8.0, what="condition"):
+def wait_for(pred, timeout=8.0, what="condition", poll=0.02):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -69,7 +69,7 @@ def wait_for(pred, timeout=8.0, what="condition"):
                 return
         except Exception:  # noqa: BLE001
             pass
-        time.sleep(0.02)
+        time.sleep(poll)
     raise AssertionError(f"timed out waiting for {what}")
 
 
@@ -114,30 +114,47 @@ def test_healthy_session_records_and_replays(tws, tmp_path):
 
 
 def test_317_resync_and_late_old_generation_callbacks(tws, tmp_path):
+    """Old-generation callbacks never touch the current book, and the published snapshot never
+    lags a state transition. Polls at 1 ms on purpose: reacting within the snapshot cadence used
+    to expose a stale 'market_data_ok' snapshot with the pre-resync book (macOS regression)."""
+    fast = 0.001
     rt = LiveRuntime(fast_cfg(tws.port, tmp_path))
-    run = Run(rt, 6.0)
-    wait_for(lambda: md_ok(rt), what="market data ok")
+    run = Run(rt, 8.0)
+    wait_for(lambda: md_ok(rt), what="market data ok", poll=fast)
     old_depth = tws.requests["reqMktDepth"][0]
     # 317: IBKR resets depth, then re-sends the book for the same reqId
     tws.error(old_depth, 317, "Market depth data has been RESET. Please empty deep book contents")
-    wait_for(lambda: rt.publisher.latest().instruments[0].book.state is not BookState.VALID, what="317 handled")
+    wait_for(lambda: rt.publisher.latest().instruments[0].book.state is not BookState.VALID,
+             what="317 handled", poll=fast)
     tws.seed_depth(old_depth)
-    wait_for(lambda: md_ok(rt), what="rebuild after 317")
+    wait_for(lambda: md_ok(rt), what="rebuild after 317", poll=fast)
+    epoch_after_317 = rt.publisher.latest().instruments[0].book.epoch
     # structural violation -> STALE -> session resyncs depth with a NEW reqId
     tws.depth(old_depth, 9, 1, 1, 21000.0, 1)         # update at a non-existent row
-    wait_for(lambda: len(tws.requests["reqMktDepth"]) == 2, what="depth resync")
+    wait_for(lambda: not md_ok(rt), what="violation visible in the published snapshot", poll=fast)
+    wait_for(lambda: len(tws.requests["reqMktDepth"]) == 2, what="depth resync", poll=fast)
     new_depth = tws.requests["reqMktDepth"][1]
     assert new_depth != old_depth
-    wait_for(lambda: md_ok(rt), what="valid after resync")
+    wait_for(lambda: md_ok(rt), what="valid after resync", poll=fast)
+    snap = rt.publisher.latest()
+    inst = snap.instruments[0]
+    depth_stream = next(st for st in inst.streams if st.stream.value == "depth")
+    # the OK snapshot must describe the NEW generation's book, never the pre-resync one
+    assert depth_stream.generation == new_depth
+    assert inst.book.epoch == epoch_after_317 + 1 and inst.book.state is BookState.VALID
+    before = inst.book
     # late callbacks from the OLD generation must not touch the book
-    before = rt.publisher.latest().instruments[0].book
     for _ in range(5):
         tws.depth(old_depth, 0, 0, 1, 20000.0, 999)
     tws.error(old_depth, 317, "late reset on old reqId")
-    wait_for(lambda: rt.engine.counters.inactive_callbacks >= 5, what="inactive callbacks counted")
-    time.sleep(0.2)
+    wait_for(lambda: rt.engine.counters.inactive_callbacks >= 5
+             and rt.engine.counters.errors_by_code.get(317, 0) == 2, what="late callbacks processed", poll=fast)
+    target_seq = rt.engine.last_seq
+    wait_for(lambda: rt.publisher.latest().seq >= target_seq, what="snapshot covers late callbacks", poll=fast)
     after = rt.publisher.latest().instruments[0].book
-    assert after.bids == before.bids and after.epoch == before.epoch and after.state is BookState.VALID
+    assert after.bids == before.bids and after.asks == before.asks
+    assert after.epoch == before.epoch and after.state is BookState.VALID
+    assert (80000, 999) not in after.bids                        # 20000.00 x 999 from the old reqId
     run.join(stop=True)
     assert_no_forbidden_messages(tws)
     assert_replay_equivalent(rt)

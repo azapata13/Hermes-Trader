@@ -519,6 +519,24 @@ class MarketEngine:
         return r
 
     # ================================================================== snapshots
+    def state_token(self) -> tuple:
+        """Cheap fingerprint of every health/quality-relevant fact exposed in snapshots.
+
+        The pipeline publishes a new snapshot IMMEDIATELY whenever this changes, so a published
+        snapshot can never keep advertising a state (e.g. market_data_ok with a pre-reset book)
+        that the engine has already left. Book row contents are covered by the publish cadence.
+        """
+        insts = []
+        for inst in self.instruments.values():
+            b = inst.book
+            insts.append((
+                inst.instrument_id, inst.contract_state, inst.market_data_type, inst.mdt_generation,
+                (b.state, b.epoch, b.needs_resync, b.issues) if b is not None else None,
+                tuple((st.generation, st.status, st.error_active) for st in inst.streams.values()),
+            ))
+        return (self.connection, self.farm_broken, self.not_live, self.conflict.phase, self.conflict.attempts,
+                self.resubscribe_all_pending, tuple(self.alerts), tuple(insts))
+
     def snapshot(self) -> MarketSnapshot:
         insts = []
         for inst in self.instruments.values():

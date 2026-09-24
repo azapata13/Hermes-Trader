@@ -71,6 +71,8 @@ class RawPipeline:
         self._next_tick: int | None = None
         self._snap_ns = snapshot_interval_ns
         self._last_publish = 0
+        self._last_token: tuple | None = None
+        self.state_publishes = 0
         self.callbacks = 0
         self.internal_errors = 0
         self.last_callback_mono_ns = 0
@@ -182,8 +184,19 @@ class RawPipeline:
             self.engine.new_alerts.clear()
 
     def _publish_if_due(self, m: int, force: bool = False) -> None:
-        if not force and m - self._last_publish < self._snap_ns:
+        """Publish at the end of a pipeline entry (one consistent state per callback).
+
+        A snapshot is published when (a) any health/quality state changed (``state_token``) —
+        IMMEDIATELY, never deferred to the cadence — or (b) the cadence elapsed (row/price
+        freshness), or (c) forced.
+        """
+        token = self.engine.state_token()
+        changed = token != self._last_token
+        if not (force or changed) and m - self._last_publish < self._snap_ns:
             return
+        if changed:
+            self.state_publishes += 1
+        self._last_token = token
         self._last_publish = m
         snap = self.engine.snapshot()
         self.publisher.publish(snap)

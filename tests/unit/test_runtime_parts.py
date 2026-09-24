@@ -225,6 +225,40 @@ def test_pipeline_is_thread_safe_for_posting():
     assert len(rec.events) == 801 and [e.seq for e in rec.events] == list(range(1, 802))
 
 
+def _feed(p, raws):
+    for ev in raws:
+        fields = {f: getattr(ev, f) for f in ev.__dataclass_fields__ if f not in ("seq", "recv_mono_ns", "recv_wall_ns")}
+        p.on_callback(ev.recv_mono_ns, ev.recv_wall_ns, type(ev), fields)
+
+
+def test_state_transitions_publish_immediately_despite_cadence():
+    """A health/quality transition must be visible in the very next published snapshot, even
+    inside the snapshot cadence window (regression: stale market_data_ok after a book reset)."""
+    from tests.support import DEPTH, RawScript
+    eng = MarketEngine(BookConfig(), SessionConfig(), SubscriptionsConfig())
+    p = RawPipeline(Normalizer(), eng, Telemetry(), SnapshotPublisher(), ListRecorder(),
+                    snapshot_interval_ns=10**12)                    # cadence effectively never elapses
+    s = RawScript().bootstrap().seed_book()
+    s.advance(600)
+    s.tick()
+    _feed(p, s.events)
+    snap = p.publisher.latest()
+    assert snap.instruments[0].market_data_ok
+    n = len(s.events)
+    s.advance(1)
+    s.depth(DEPTH, 9, 1, 1, 21000.0, 1)                              # structural violation -> STALE
+    _feed(p, s.events[n:])
+    snap = p.publisher.latest()
+    assert not snap.instruments[0].market_data_ok and snap.instruments[0].book.state.value == "stale"
+    assert snap.seq == eng.last_seq
+    # no state change inside the cadence window -> no extra publish
+    published = p.publisher.published
+    n = len(s.events)
+    s.heartbeat()
+    _feed(p, s.events[n:])
+    assert p.publisher.published == published
+
+
 def test_snapshot_published():
     p, _, _ = pipeline()
     p.on_callback(1, 1, R.RawNextValidId, {"order_id": 1})
