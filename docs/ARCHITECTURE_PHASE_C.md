@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6+ not started.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7+ not started.
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -259,6 +259,37 @@ window is labelled with the older side at reduced confidence.
 - Known limitations: the calendar comes from one `reqContractDetails` per process (≈1 week horizon, beyond it
   sessions are UNKNOWN until restart); outage flags use receive wall time while bars use exchange time.
 
+## 8c. C6 — Deterministic replay (implemented)
+
+`hermes/replay/` — `source.py` (RecordingSource), `clock.py` (ReplayClock), `runner.py` (replay_session),
+`fingerprint.py` (state hash), `checkpoints.py` (Checkpointer, shared by live and replay); tool `tools/replay_report.py`.
+
+- **Same pipeline:** raw `.hrec` → `Normalizer` → the SAME `MarketEngine` (book, BBO, classifier, tape, bars,
+  sessions, health). The source replaces IBKR only. No ibapi client, no sockets, no requests (subprocess safety
+  test with ibapi imports and network blocked). Processing errors take the same engine fail-safe as live.
+- **Clock:** engine time is event fields only; `ReplayClock` exposes recorded mono/wall. **FAST** runs flat out;
+  **PACED** sleeps recorded inter-event time / `speed` (wall time decides sleeps only) — identical results (tested).
+- **Validation:** magic, `format`, codec `schema_version`, raw-type field sets by name (mismatch = incompatible,
+  never guessed), `normalizer_version`, per-part header consistency → `ReplayIncompatible`. Supported sets are the
+  explicit migration boundaries. Contract-metadata absence is reported.
+- **Integrity (single pass):** declared gaps, missing/undeclared seq ranges, out-of-order, corrupt frames
+  (implausible length / undecodable payload) vs **truncated final record** (complete prefix kept), clean close,
+  `raw_digest` (SHA-256 of raw record bytes). Labels: COMPLETE · COMPLETE UP TO seq N — NOT CLEANLY CLOSED ·
+  INCOMPLETE (best-effort diagnostic; deterministic through seq N). `stop_at_gap` replays only the prefix.
+- **Fingerprint:** canonical whitelisted summary (seq, connection/farm/not-live/10197, alerts, counters, streams,
+  md reasons, book state/epoch/rows, BBO, L1, classifier, tape totals + latest trades, bar counters + forming +
+  latest bars, flags, session context) → canonical JSON (sorted maps, enum values) → SHA-256; no addresses, clocks
+  or receive timestamps. `HASH_VERSION` versioned.
+- **Checkpoints:** every N raw seqs (default 10 000), each 30 s bar close, each health transition, final. Live
+  runs record them on the dispatch thread and write `<session>/checkpoints.json` at shutdown with
+  `code_fingerprint` (content hash of the deterministic-path sources), engine `config_fingerprint` and policy.
+- **Claims:** A. raw-event reproducibility (same bytes → same checkpoints) always; B. same-code live-vs-replay
+  equivalence only when fingerprints match, and only through the contiguous prefix. Pre-C6 recordings replay
+  through current code (C4/C5 state derived) with no historical-equivalence claim. Replay uses the recording's
+  config snapshot by default (`--config current|path` to override).
+- Performance (cloud container, 100 k raw, depth-heavy): ≈ 41 k raw/s with checkpoints (decode ≈ 210 k/s,
+  decode+normalize ≈ 95 k/s, shared engine ≈ 100 k events/s dominates; hash ≈ 0.3 ms/checkpoint).
+
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 
 Tape (bounded, BUY/SELL/UNKNOWN with method + confidence; delta split buy/sell/unknown),
@@ -351,11 +382,13 @@ hermes/
        readonly.py gateway.py adapter.py session.py
   market/events.py pricegrid.py orderbook.py health.py engine.py snapshot.py
          classify.py tape.py (C4) bars.py sessions.py (C5)
+  replay/source.py clock.py runner.py fingerprint.py checkpoints.py (C6)
   storage/codec.py recorder.py reader.py
   app/run_live.py              python -m hermes.app.run_live [--duration N]
 tools/inspect_recording.py     recording verification report
 tools/tape_report.py           C4 classifier calibration (ambiguity window)
 tools/bar_report.py            C5 bars / session report, close-grace calibration, per-stage costs
+tools/replay_report.py         C6 deterministic replay, integrity, state hash, verify/compare
 tools/phase_b/*.py             Phase B diagnostics (ReadOnlyClient)
 config/hermes.toml
 tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (manual)
@@ -370,13 +403,14 @@ tests/unit tests/property tests/safety tests/integration (fake TWS) tests/live (
 - **Live (manual):** `tests/live/test_live_smoke.py` / `python -m hermes.app.run_live --duration 60`.
 - **C4:** classifier rules, windows, eligibility, tape bounds/totals, engine integration.
 - **C5:** 30 s membership/closing/grace/late, empty bars vs closures/weekend, 1 m/5 m == direct computation, flags (disconnect, 10197, resubscribe, startup), eligibility, sessions (formats, invalid, aliases, DST 2026 spring/fall, ambiguous/nonexistent), session context/VWAP/previous, determinism, snapshots, bar_report.
-- **C6–C9:** as planned (full replay tool, metrics scenarios, soak).
+- **C6:** replay == direct processing for book (ins/upd/del, 317, old generations), classifier (all methods, resets), bars (empty, late, flags, session/VWAP), health (1100/1101/1102, 10197, delayed, reconnect, generations); FAST×2 and FAST vs PACED identical; integrity (clean, multi-part, declared gap, missing seq, truncated tail, no footer, corrupt length/payload, bad magic, incompatible schema/format/normalizer, unknown fields); hash order/clock/RNG independence; live-vs-replay checkpoint equivalence in every fake-TWS end-to-end test; ibapi/network-blocked safety; real-recording manual test.
+- **C7–C9:** as planned (metrics scenarios, soak).
 
 ---
 
 ## 15. Milestones
 
-C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ tape/classifier · C5 ✅ bars/session · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
+C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ tape/classifier · C5 ✅ bars/session · C6 ✅ replay · C6 replay tool + equivalence harness · C7 metrics L1 · C8 metrics L2 · C9 health
 hardening/soak.
 
 ---

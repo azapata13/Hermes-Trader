@@ -33,10 +33,12 @@ from hermes.ibkr.normalizer import NORMALIZER_VERSION, Normalizer
 from hermes.ibkr.session import Heartbeat, IbkrSession, Supervisor, spec_from_config
 from hermes.market.engine import MarketEngine
 from hermes.market.snapshot import MarketSnapshot, SnapshotPublisher
+from hermes.replay import fingerprint as fp
+from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
 from hermes.storage.reader import verify_session
 from hermes.storage.recorder import Recorder
 
-HERMES_VERSION = "0.4.0-c3"
+HERMES_VERSION = "0.6.0-c6"
 log = logging.getLogger("hermes.app")
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -57,7 +59,8 @@ def build_meta(cfg: HermesConfig) -> dict[str, Any]:
         "hermes_version": HERMES_VERSION, "git_commit": git_commit(), "ibapi_version": ibapi.__version__,
         "python": platform.python_version(), "platform": platform.platform(),
         "normalizer_version": NORMALIZER_VERSION, "contract_spec": dict(spec_from_config(cfg).to_params()),
-        "config": dataclasses.asdict(cfg),
+        "config": dataclasses.asdict(cfg), "code_fingerprint": fp.code_fingerprint(),
+        "config_fingerprint": fp.config_fingerprint(cfg), "hash_version": fp.HASH_VERSION,
     }
 
 
@@ -117,6 +120,10 @@ class LiveRuntime:
         self.gateway = RequestGateway(self.pipeline.post_local, cfg.gateway)
         self.session = IbkrSession(cfg, self.pipeline, self.gateway)
         self.pipeline.consumers.append(self.session)
+        # C6: deterministic checkpoints on the dispatch thread (same code as replay); written at shutdown
+        self.checkpointer = Checkpointer(self.engine)
+        self.pipeline.consumers.append(self.checkpointer)
+        self.checkpoint_file: Path | None = None
         self.supervisor = Supervisor(cfg, self.pipeline, self.gateway, self.session)
         self.max_msg_queue = 0
         self._violations_reported = 0
@@ -138,11 +145,24 @@ class LiveRuntime:
         finally:
             self.heartbeat.stop()
             self.pipeline.pump()
+            self.checkpointer.finalize()           # dispatch thread has ended; single reader now
             self.reporter.stop()
             if self.recorder is not None:
                 self.recorder.stop()
                 self.verification = verify_session(self.recorder.session_dir)
+                self._save_checkpoints()
         return self.summary()
+
+    def _save_checkpoints(self) -> None:
+        """Persist live checkpoints next to the recording (never on the dispatch thread)."""
+        try:
+            self.checkpoint_file = self.checkpointer.save(
+                Path(self.recorder.session_dir) / SIDECAR_NAME,  # type: ignore[union-attr]
+                source="live", session_id=self.recorder.session_id,  # type: ignore[union-attr]
+                hermes_version=HERMES_VERSION, code_fingerprint=fp.code_fingerprint(),
+                config_fingerprint=fp.config_fingerprint(self.cfg), normalizer_version=NORMALIZER_VERSION)
+        except OSError as exc:
+            log.error("could not write live checkpoints: %s", exc)
 
     def msg_queue_depth(self) -> int:
         c = self.supervisor.client
@@ -311,6 +331,8 @@ class LiveRuntime:
             "raw_events": self.pipeline.seq, "callbacks": self.pipeline.callbacks,
             "recording": str(self.recorder.session_dir) if self.recorder else None,
             "replay_complete": ver.replay_complete if ver else None,
+            "live_checkpoints": len(self.checkpointer.checkpoints),
+            "final_state_hash": self.checkpointer.final.hash if self.checkpointer.final else None,
             "connect_attempts": self.supervisor.connect_attempts,
         }
 

@@ -95,6 +95,31 @@ def test_insert_truncates_to_depth_rows():
     assert LevelChange(B, 101, 0, 2, False) in changes
 
 
+
+def test_repeated_terminal_delete_is_opaque_tail_noop():
+    """Regression for real CME/TWS sequence seen in the MNQ recording."""
+    book = OrderBook(cfg(depth_rows=3, min_valid_rows=1))
+
+    for i, price in enumerate((101, 102, 103)):
+        book.apply(A, INS, i, price, 1, 0)
+
+    # First DELETE removes the known terminal row.
+    first = book.apply(A, DEL, 2, 0, 0, 1)
+    assert first == (LevelChange(A, 103, 1, 0, True),)
+    assert book.levels(A) == ((101, 1), (102, 1))
+
+    # TWS may immediately repeat DELETE at the same requested position.
+    # It refers to the opaque tail, not one of the known rows.
+    assert book.apply(A, DEL, 2, 0, 0, 2) == ()
+    assert book.levels(A) == ((101, 1), (102, 1))
+    assert book.state is not BookState.STALE
+    assert book.counters.opaque_tail_deletes == 1
+    assert book.counters.violations.get(
+        ViolationKind.POSITION_OUT_OF_RANGE, 0
+    ) == 0
+
+
+
 @pytest.mark.parametrize("op,pos,rows", [
     (INS, 3, 2),     # pos > len
     (INS, -1, 0),

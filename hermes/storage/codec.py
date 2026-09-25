@@ -136,8 +136,11 @@ class Decoder:
         types = {}
         for code, (name, fields) in body["types"].items():
             cls = getattr(R, name, None)
-            if cls is None or not dataclasses.is_dataclass(cls):
+            if cls is None or not dataclasses.is_dataclass(cls) or cls not in _FIELDS:
                 raise CodecError(f"unknown raw type {name!r} in header")
+            if set(fields) != set(_FIELDS[cls]):
+                # Never guess: a field added/removed/renamed means a different schema.
+                raise CodecError(f"field mismatch for {name}: recorded {list(fields)} vs current {list(_FIELDS[cls])}")
             types[int(code)] = (cls, tuple(fields))
         self._types = types
 
@@ -152,25 +155,52 @@ class Decoder:
         values = rec[2:]
         if len(values) != len(fields):
             raise CodecError(f"{cls.__name__}: {len(values)} values for {len(fields)} fields")
-        return cls(**{f: _tuplify(v) for f, v in zip(fields, values)})
+        return cls(**{f: (_tuplify(v) if type(v) is list else v) for f, v in zip(fields, values)})
 
 
-def iter_frames(data: bytes, offset: int = 0) -> Iterator[tuple[int, list | None]]:
-    """Yield (offset, record) for each complete frame; a final (offset, None) marks a truncated tail."""
-    unpack = lambda b: msgpack.unpackb(b, ext_hook=_ext_hook, raw=False, strict_map_key=False)  # noqa: E731
+TAIL_TRUNCATED = "truncated_tail"   # last frame incomplete (crash mid-write): all earlier records intact
+TAIL_CORRUPT = "corrupt"            # implausible length prefix or undecodable payload: data after it unreadable
+
+
+def _unpack(b: bytes) -> Any:
+    return msgpack.unpackb(b, ext_hook=_ext_hook, raw=False, strict_map_key=False)
+
+
+def scan_frames(data: bytes, offset: int = 0) -> Iterator[tuple[int, list | None, bytes | str]]:
+    """Yield ``(offset, record, payload_bytes)`` per complete frame. A readable prefix ends with one
+    final ``(offset, None, reason)`` where reason is ``TAIL_TRUNCATED`` or ``TAIL_CORRUPT``.
+
+    Truncated tail = fewer than 4 bytes left, or a plausible length prefix that runs past the end of
+    the file (the writer died mid-frame). Corrupt = length prefix above ``MAX_RECORD_BYTES`` or a
+    complete frame whose payload does not decode.
+    """
     n = len(data)
     while offset < n:
         if n - offset < 4:
-            yield offset, None
+            yield offset, None, TAIL_TRUNCATED
             return
         (length,) = _LEN.unpack_from(data, offset)
-        if length > MAX_RECORD_BYTES or offset + 4 + length > n:
-            yield offset, None
+        if length > MAX_RECORD_BYTES:
+            yield offset, None, TAIL_CORRUPT
             return
+        end = offset + 4 + length
+        if end > n:
+            yield offset, None, TAIL_TRUNCATED
+            return
+        payload = data[offset + 4: end]
         try:
-            rec = unpack(data[offset + 4: offset + 4 + length])
+            rec = _unpack(payload)
         except Exception:  # noqa: BLE001 - corrupt payload ends the readable prefix
-            yield offset, None
+            yield offset, None, TAIL_CORRUPT
             return
-        yield offset, rec
-        offset += 4 + length
+        if not isinstance(rec, list) or not rec or not isinstance(rec[0], int):
+            yield offset, None, TAIL_CORRUPT
+            return
+        yield offset, rec, payload
+        offset = end
+
+
+def iter_frames(data: bytes, offset: int = 0) -> Iterator[tuple[int, list | None]]:
+    """Yield (offset, record) for each complete frame; a final (offset, None) marks a truncated/corrupt tail."""
+    for off, rec, _ in scan_frames(data, offset):
+        yield off, rec
