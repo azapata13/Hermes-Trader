@@ -19,6 +19,7 @@ from hermes.config import load_config
 from hermes.ibkr import codes
 from hermes.market.health import ConflictPhase
 from hermes.market.orderbook import BookState
+from hermes.replay.runner import replay_session
 from hermes.storage.reader import iter_raw_events, verify_session
 from tests.fake_tws import FakeTws
 from tests.support import Harness
@@ -96,6 +97,13 @@ def assert_replay_equivalent(rt):
     assert ver.replay_complete, ver.problems
     h = Harness(rt.cfg.book, rt.cfg.session, rt.cfg.subscriptions, rt.cfg.tape, rt.cfg.bars).feed(iter_raw_events(rt.recorder.session_dir))
     assert h.engine.snapshot() == rt.engine.snapshot()        # deterministic live/replay equivalence
+    # C6: the authoritative replay reproduces the LIVE checkpoint sequence (same code, same config)
+    assert rt.checkpoint_file is not None and rt.checkpoint_file.exists()
+    r = replay_session(rt.recorder.session_dir)
+    assert r.integrity.replay_complete and r.config_source == "recorded"
+    assert r.live_compare is not None and r.live_compare.equivalent, r.live_compare_status
+    assert r.live_compare.final_match and r.final_hash == rt.checkpointer.final.hash
+    assert r.live_compare.compared == len(rt.checkpointer.checkpoints) > 0
     return ver
 
 

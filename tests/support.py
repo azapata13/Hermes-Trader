@@ -147,6 +147,53 @@ def book_cfg(**kw) -> BookConfig:
     return BookConfig(**kw)
 
 
+def write_hrec(session_dir, events, meta: dict | None = None, final: bool = True, gaps=(),
+               rotate_at: int | None = None, session_id: str = "test-session", header_over: dict | None = None):
+    """Write raw events as a .hrec session synchronously (deterministic test recordings).
+
+    ``gaps``: iterable of (index, first_seq, last_seq, reason) -> a GAP record before events[index].
+    ``rotate_at``: start part-0002 before events[rotate_at]. Returns the session directory.
+    """
+    import dataclasses as _dc
+    from pathlib import Path as _P
+
+    from hermes.config import HermesConfig
+    from hermes.ibkr.normalizer import NORMALIZER_VERSION
+    from hermes.storage.codec import MAGIC, Encoder
+
+    d = _P(session_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    m = {"hermes_version": "test", "normalizer_version": NORMALIZER_VERSION, "ibapi_version": "10.45.1",
+         "python": "3.11", "contract_spec": dict(SPEC.to_params()), "config": _dc.asdict(HermesConfig())}
+    m.update(meta or {})
+    enc = Encoder()
+    gap_at = {g[0]: g[1:] for g in gaps}
+    part, fh = 0, None
+
+    def open_part():
+        nonlocal part, fh
+        part += 1
+        fh = open(d / f"part-{part:04d}.hrec", "wb")
+        hdr = {"session_id": session_id, "part": part, "created_wall_ns": 0, "seq_origin": 1, "meta": m}
+        hdr.update(header_over or {})
+        fh.write(MAGIC + enc.header(hdr))
+
+    open_part()
+    for i, ev in enumerate(events):
+        if rotate_at is not None and i == rotate_at:
+            fh.write(enc.footer({"final": False}))
+            fh.close()
+            open_part()
+        if i in gap_at:
+            a, b, why = gap_at[i]
+            fh.write(enc.gap(a, b, b - a + 1, why, 0, 0))
+        fh.write(enc.raw(ev))
+    if final:
+        fh.write(enc.footer({"final": True}))
+    fh.close()
+    return d
+
+
 class Harness:
     """Normalizer + MarketEngine driven by raw events (what the live pipeline and replay do)."""
 
