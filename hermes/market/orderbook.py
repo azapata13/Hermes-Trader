@@ -9,7 +9,12 @@ Each side is a list of rows ``(price_units, size)``, best first, at most ``depth
 * INSERT  valid when ``0 <= pos <= len`` and ``pos < depth_rows``; rows below shift down;
           the side is truncated back to ``depth_rows``.
 * UPDATE  valid when ``0 <= pos < len``; replaces price AND size (the price may change).
-* DELETE  valid when ``0 <= pos < len``; rows below shift up.
+* DELETE  normally requires ``0 <= pos < len``; rows below shift up.
+          One narrow exception is an opaque tail delete at ``pos == len == depth_rows - 1``.
+          Real TWS/CME depth can emit repeated deletes at the last requested row after the
+          first terminal delete has already reduced our known window by one row. Such a
+          callback cannot change any known row, so it is accepted as a no-op rather than
+          falsely declaring the whole book structurally corrupt.
 
 Anything else (or a negative size / unknown side / unknown op) is a STRUCTURAL violation: the
 row array is no longer knowable, so the book goes STALE immediately, is cleared, ignores row
@@ -135,6 +140,7 @@ class BookCounters:
     updates: int = 0
     deletes: int = 0
     truncations: int = 0
+    opaque_tail_deletes: int = 0
     ignored_while_stale: int = 0
     bbo_updates: int = 0
     violations: dict[ViolationKind, int] = field(default_factory=dict)
@@ -202,10 +208,23 @@ class OrderBook:
             return ()
 
         n = len(rows)
+
+        # Observed on real CME/TWS: after a full N-row side receives DELETE at N-1,
+        # TWS may immediately emit another DELETE at N-1 even though our known
+        # list now contains N-1 rows. That callback refers only to the opaque
+        # edge beyond our known prefix.
+        opaque_tail_delete = (
+            op is DepthOp.DELETE
+            and position == n
+            and n == self._max_rows - 1
+        )
+
         if op is DepthOp.INSERT:
             ok = 0 <= position <= n and position < self._max_rows
-        elif op is DepthOp.UPDATE or op is DepthOp.DELETE:
+        elif op is DepthOp.UPDATE:
             ok = 0 <= position < n
+        elif op is DepthOp.DELETE:
+            ok = 0 <= position < n or opaque_tail_delete
         else:
             self._structural(ViolationKind.INVALID_OP, now_ns)
             return ()
@@ -219,6 +238,18 @@ class OrderBook:
         before = rows.copy()
         c = self.counters
         c.ops += 1
+
+        if opaque_tail_delete:
+            # No known row is removed: the callback refers to the hidden edge
+            # outside our currently known prefix.
+            c.deletes += 1
+            c.opaque_tail_deletes += 1
+            self._last_update_ns = now_ns
+            if self._state is BookState.EMPTY:
+                self._transition(BookState.BUILDING, now_ns, "first depth data")
+            self._evaluate(now_ns)
+            return ()
+
         if op is DepthOp.INSERT:
             c.inserts += 1
             rows.insert(position, (price_units, size))

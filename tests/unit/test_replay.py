@@ -133,6 +133,30 @@ def test_book_insert_update_delete(tmp_path):
     assert book.bids[0] == (84000, 99) and book.asks[4] == (84005, 7)
 
 
+def test_real_tws_repeated_terminal_delete_does_not_force_resync(tmp_path):
+    """Replay regression for DELETE ASK pos=9 twice on a 10-row CME window."""
+    sc = RawScript(wall0=T0 * S)
+    sc.bootstrap(**WEEK)
+    sc.seed_book(rows=10)
+    ticks(sc, 600)
+
+    sc.depth(DEPTH, 9, 2, 0, 0.0, 0)
+    sc.depth(DEPTH, 9, 2, 0, 0.0, 0)
+    ticks(sc, 300)
+
+    r, _ = check(tmp_path, sc)
+
+    book = r.engine.snapshot().instrument(1).book
+    assert book.state is BookState.VALID
+    assert len(book.asks) == 9
+
+    live_book = r.engine.instruments[1].book
+    assert live_book is not None
+    assert live_book.counters.opaque_tail_deletes == 1
+    assert live_book.counters.violations == {}
+
+
+
 def test_317_reset_rebuild_and_old_generation_callbacks_ignored(tmp_path):
     sc = ready()
     sc.error(DEPTH, 317, "Market depth data has been RESET")
