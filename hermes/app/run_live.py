@@ -38,7 +38,7 @@ from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
 from hermes.storage.reader import verify_session
 from hermes.storage.recorder import Recorder
 
-HERMES_VERSION = "0.6.0-c6"
+HERMES_VERSION = "0.7.0-c7"
 log = logging.getLogger("hermes.app")
 _REPO = Path(__file__).resolve().parents[2]
 

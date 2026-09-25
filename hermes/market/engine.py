@@ -27,6 +27,7 @@ from hermes.market.events import AnomalyKind, ConnectionState, ErrorClass, Strea
 from hermes.market.bars import BarEngine, BarFlag, TradeDisposition
 from hermes.market.classify import QuoteState, TradeClassifier
 from hermes.market.health import ConflictPhase, ConflictRecovery, StreamState
+from hermes.market.metrics import MetricsEngine
 from hermes.market.orderbook import BookState, InvalidationReason, OrderBook
 from hermes.market.pricegrid import PriceGrid
 from hermes.market.sessions import SessionCalendar, SessionTracker
@@ -103,6 +104,7 @@ class InstrumentState:
     instrument_id: int
     required: tuple[Stream, ...]
     streams: dict[Stream, StreamState]
+    metrics: MetricsEngine
     local_symbol: str = ""
     con_id: int | None = None
     contract_state: str = "pending"
@@ -200,10 +202,13 @@ class MarketEngine:
     def instrument(self, instrument_id: int) -> InstrumentState:
         inst = self.instruments.get(instrument_id)
         if inst is None:
-            inst = InstrumentState(instrument_id, self._required, {s: StreamState(s) for s in MARKET_STREAMS},
-                                   tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg),
-                                   bars=BarEngine(self._bars_cfg, instrument_id) if self._bars_on else None,
-                                   sessions=SessionTracker(self._bars_cfg.close_grace_ms))
+            inst = InstrumentState(
+                instrument_id=instrument_id, required=self._required,
+                streams={s: StreamState(s) for s in MARKET_STREAMS},
+                metrics=MetricsEngine(instrument_id),
+                tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg),
+                bars=BarEngine(self._bars_cfg, instrument_id) if self._bars_on else None,
+                sessions=SessionTracker(self._bars_cfg.close_grace_ms))
             self.instruments[instrument_id] = inst
         return inst
 
@@ -237,18 +242,22 @@ class MarketEngine:
         inst.streams[Stream.DEPTH].on_data(ev.recv_mono_ns)
         if inst.book is not None:
             inst.book.apply(ev.side, ev.op, ev.position, ev.price_units, ev.size, ev.recv_mono_ns)
+            inst.metrics.observe_book(inst.book.snapshot(), ev.recv_mono_ns, depth_event=True)
 
     def _on_depth_reset(self, ev: M.DepthResetEvent) -> None:
         inst = self.instruments[ev.instrument_id]
         if inst.book is not None:
             inst.book.reset(ev.reason, ev.recv_mono_ns)
+        inst.metrics.break_book(f"depth_reset:{ev.reason.value}", ev.recv_mono_ns)
 
     def _on_bbo(self, ev: M.BboEvent) -> None:
         inst = self.instruments[ev.instrument_id]
         inst.streams[Stream.BBO].on_data(ev.recv_mono_ns)
         inst.bbo = BboSnapshot(ev.bid_units, ev.ask_units, ev.bid_size, ev.ask_size, ev.exch_ts_s, ev.recv_mono_ns)
+        inst.metrics.on_bbo(ev.recv_mono_ns)
         if inst.book is not None:
             inst.book.on_bbo(ev.bid_units, ev.ask_units, ev.recv_mono_ns)
+            inst.metrics.observe_book(inst.book.snapshot(), ev.recv_mono_ns)
         inst.classifier.on_quote(QuoteState(ev.bid_units, ev.ask_units, ev.bid_size, ev.ask_size, ev.seq,  # type: ignore[union-attr]
                                             ev.generation, ev.recv_mono_ns, ev.recv_wall_ns, ev.exch_ts_s))
 
@@ -260,7 +269,7 @@ class MarketEngine:
         c = inst.classifier.classify(ev.price_units, ev.size, ev.past_limit, ev.unreported,  # type: ignore[union-attr]
                                      ev.special_conditions, ev.generation, ev.recv_mono_ns, ok)
         q = c.quote
-        inst.tape.append(ClassifiedTrade(  # type: ignore[union-attr]
+        classified = ClassifiedTrade(
             instrument_id=ev.instrument_id, seq=ev.seq, generation=ev.generation, tape_epoch=inst.tape.epoch,  # type: ignore[union-attr]
             exch_ts_s=ev.exch_ts_s, recv_mono_ns=ev.recv_mono_ns, recv_wall_ns=ev.recv_wall_ns,
             price_units=ev.price_units, size=ev.size, exchange=ev.exchange,
@@ -270,7 +279,9 @@ class MarketEngine:
             quote_ask_units=q.ask_units if q else None, quote_seq=q.seq if q else None,
             ref_quote_seq=c.ref_quote_seq,
             book_valid=inst.book is not None and inst.book.state is BookState.VALID,
-            ref_quote_age_ns=c.ref_quote_age_ns))
+            ref_quote_age_ns=c.ref_quote_age_ns)
+        inst.tape.append(classified)  # type: ignore[union-attr]
+        inst.metrics.on_trade(classified)
         bars = inst.bars
         if bars is not None:
             ts = ev.exch_ts_s if ev.exch_ts_s > 0 else ev.recv_wall_ns // _S
@@ -510,7 +521,9 @@ class MarketEngine:
         for inst in self.instruments.values():
             if inst.book is not None:
                 inst.book.evaluate(now)
+                inst.metrics.observe_book(inst.book.snapshot(), now)
             inst.tape.evict_by_age(now)  # type: ignore[union-attr]
+            inst.metrics.advance(now)
         before = self.conflict.phase
         self.conflict.on_tick(now)
         if before is not self.conflict.phase:
@@ -681,6 +694,7 @@ class MarketEngine:
                 (b.state, b.epoch, b.needs_resync, b.issues) if b is not None else None,
                 tuple((st.generation, st.status, st.error_active) for st in inst.streams.values()),
                 self._tape_token(inst),
+                inst.metrics.token(),
                 inst.bars.token() if inst.bars is not None else None,
                 inst.sessions.token(),  # type: ignore[union-attr]
             ))
@@ -726,7 +740,8 @@ class MarketEngine:
                 streams=streams, market_data_ok=not reasons, not_ok_reasons=tuple(reasons),
                 tape=self.tape_snapshot(inst),
                 bars=inst.bars.snapshot(self._bars_cfg.snapshot_bars) if inst.bars is not None else None,
-                session=inst.sessions.snapshot()))  # type: ignore[union-attr]
+                session=inst.sessions.snapshot(),  # type: ignore[union-attr]
+                metrics=inst.metrics.snapshot()))
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,

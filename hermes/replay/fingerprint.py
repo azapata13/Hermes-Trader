@@ -11,10 +11,11 @@ health reasons, book state/epoch/issues/all rows, BBO, last trade, L1 fields, cl
 trades, bar counters + forming 30 s/1 m/5 m + latest completed bar per timeframe, quality flags,
 session context (session / RTH / overnight / previous, integer VWAP accumulators).
 
-Excluded by construction: object addresses, process clocks, receive timestamps of individual
-events (the recorded ``seq`` already fixes ordering), anything iteration-order dependent. Every
-completed bar appears in the checkpoint stream (one checkpoint per bar close), so the full bar
-history is covered without hashing it wholesale each time.
+Excluded by construction: object addresses, process clocks and anything iteration-order
+dependent. C7 rolling metrics intentionally include their bounded recorded ``recv_mono_ns``
+timestamps because deterministic window eviction depends on them. Every completed bar appears
+in the checkpoint stream (one checkpoint per bar close), so the full bar history is covered
+without hashing it wholesale each time.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-HASH_VERSION = 1
+HASH_VERSION = 2
 LATEST_TRADES = 5
 
 # Deterministic-path sources: their content defines "same code" for live-vs-replay equivalence.
@@ -34,6 +35,7 @@ _CODE_FILES = (
     "hermes/ibkr/raw_events.py", "hermes/ibkr/normalizer.py", "hermes/ibkr/contracts.py", "hermes/ibkr/codes.py",
     "hermes/ibkr/errors.py", "hermes/ibkr/market_rules.py", "hermes/market/events.py", "hermes/market/pricegrid.py",
     "hermes/market/orderbook.py", "hermes/market/health.py", "hermes/market/classify.py", "hermes/market/tape.py",
+    "hermes/market/metrics.py",
     "hermes/market/bars.py", "hermes/market/sessions.py", "hermes/market/engine.py", "hermes/market/snapshot.py",
     "hermes/replay/fingerprint.py", "hermes/replay/checkpoints.py",
 )
@@ -117,6 +119,7 @@ def _instrument(engine, inst) -> tuple:
          tuple(_trade(t) for t in tape.latest(LATEST_TRADES))),
         bars_part,
         inst.sessions.snapshot() if inst.sessions is not None else None,
+        inst.metrics.fingerprint_state(),
     )
 
 

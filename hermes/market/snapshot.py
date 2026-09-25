@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from hermes.market.events import ConnectionState, Stream, StreamStatus
 from hermes.market.bars import BarsSnapshot
+from hermes.market.metrics import MetricsSnapshot
 from hermes.market.orderbook import BookSnapshot
 from hermes.market.sessions import SessionSnapshot
 from hermes.market.tape import TapeSnapshot
@@ -61,6 +62,7 @@ class InstrumentSnapshot:
     tape: TapeSnapshot | None = None   # C4 compact view (latest N trades + totals), never the full tape
     bars: BarsSnapshot | None = None   # C5 forming + latest N completed bars per timeframe, quality counters
     session: SessionSnapshot | None = None   # C5 exchange session context (session / RTH / overnight / previous)
+    metrics: MetricsSnapshot | None = None   # C7 deterministic order-flow measurements
 
 
 @dataclass(frozen=True, slots=True)
