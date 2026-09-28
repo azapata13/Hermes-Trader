@@ -239,7 +239,7 @@ def test_actionable_payload_alone_is_never_approval_eligible():
     assert r.status is CandidateStatus.ACTIONABLE and r.approval_allowed_now      # lifecycle allows ...
     p = approval_payload(r)
     assert p.actionable and p.lifecycle_allows and not p.approval_allowed_now    # ... payload alone does not
-    assert [d.code for d in p.approval_denied_reasons] == [SAFETY_NOT_EVALUATED]
+    assert [d.code for d in p.denied_reasons] == [SAFETY_NOT_EVALUATED]
     assert p.entry_reference == rec.candidate.entry_reference                   # static info still reported
 
 
@@ -249,7 +249,7 @@ def test_fresh_passing_safety_result_is_required_and_sufficient():
     r = lv.lc.get(rec.setup_id)
     now = (T0 + 605) * S
     p = current_approval_payload(lv.h.engine, r, now_wall_ns=now)
-    assert p.approval_allowed_now and p.approval_denied_reasons == () and p.approval_safety.allowed
+    assert p.approval_allowed_now and p.denied_reasons == () and p.approval_safety.allowed
 
 
 def test_forged_or_mismatched_safety_results_are_rejected(base):
@@ -264,7 +264,7 @@ def test_forged_or_mismatched_safety_results_are_rejected(base):
 
     class Fake:                                                         # duck-typed "allowed=True"
         allowed = True
-    codes = lambda s: {d.code for d in approval_payload(r, s).approval_denied_reasons}  # noqa: E731
+    codes = lambda s: {d.code for d in approval_payload(r, s).denied_reasons}  # noqa: E731
     assert not approval_payload(r, Fake()).approval_allowed_now and SAFETY_NOT_EVALUATED in codes(Fake())
     lifecycle_result = ev(dataclasses.replace(f, now_wall_ns=now), purpose=PURPOSE_LIFECYCLE, baseline=r.candidate)
     assert lifecycle_result.allowed and SAFETY_RESULT_NOT_FOR_APPROVAL in codes(lifecycle_result)
@@ -284,7 +284,7 @@ def test_final_statuses_are_never_approval_eligible_even_with_a_passing_result(f
     assert good.allowed
     done = dataclasses.replace(r, status=CandidateStatus(final), approval_allowed_now=False)
     p = approval_payload(done, good)
-    assert not p.approval_allowed_now and "candidate_status_not_actionable" in {d.code for d in p.approval_denied_reasons}
+    assert not p.approval_allowed_now and "candidate_status_not_actionable" in {d.code for d in p.denied_reasons}
 
 
 def test_lifecycle_hold_denies_even_with_a_passing_result():
@@ -293,7 +293,7 @@ def test_lifecycle_hold_denies_even_with_a_passing_result():
     good = approval_check(lv.h.engine, r, now_wall_ns=(T0 + 605) * S)
     held = dataclasses.replace(r, approval_allowed_now=False)
     p = approval_payload(held, good)
-    assert not p.approval_allowed_now and "lifecycle_hold_active" in {d.code for d in p.approval_denied_reasons}
+    assert not p.approval_allowed_now and "lifecycle_hold_active" in {d.code for d in p.denied_reasons}
 
 
 def test_failing_safety_result_reasons_are_reported_bare():
@@ -303,7 +303,7 @@ def test_failing_safety_result_reasons_are_reported_bare():
     lv.pump()
     r = lv.lc.get(rec.setup_id)
     p = approval_payload(r, approval_check(lv.h.engine, r, now_wall_ns=(T0 + 606) * S))
-    codes = {d.code for d in p.approval_denied_reasons}
+    codes = {d.code for d in p.denied_reasons}
     assert not p.approval_allowed_now and {"connection_unusable", "candidate_status_not_actionable"} <= codes
 
 

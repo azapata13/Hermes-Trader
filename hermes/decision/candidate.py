@@ -38,12 +38,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from hermes.config import PRIMARY_ORDERFLOW, DecisionConfig
+from hermes.decision.reasons import (
+    SRC_BAR_QUALITY, SRC_ORDERFLOW, SRC_RISK, SRC_SAFETY, SRC_SESSION, SRC_TIMING, Reason, Severity)
 from hermes.decision.safety import PURPOSE_CREATION, SafetyPolicy, SafetyResult, facts_from_context
 from hermes.decision.context import EPISTEMIC_NOTES, BarContext, DecisionContext, build_decision_context
 from hermes.market.bars import Bar, BarFlag
 from hermes.market.snapshot import MarketSnapshot
 
-CANDIDATE_SCHEMA_VERSION = 1
+CANDIDATE_SCHEMA_VERSION = 2   # C9e: structured reasons + units_per_point
 
 _BAD_FLAGS = int(BarFlag.DATA_GAP | BarFlag.MARKET_DATA_INVALID | BarFlag.CONNECTION_INTERRUPTION | BarFlag.PARTIAL)
 _CAUTION_FLAGS = int(BarFlag.LATE_DATA_OBSERVED | BarFlag.SESSION_BOUNDARY)
@@ -138,6 +140,8 @@ class SetupCandidate:
     proposed_stop: int | None
     risk_points: float | None
     risk: RiskProposal | None
+    # DEPRECATED legacy strings: internal stats / backward compatibility only; never parsed for any
+    # decision. ``reasons`` (structured) is canonical for every approval/UI interface.
     supporting_reasons: tuple[str, ...]
     caution_reasons: tuple[str, ...]
     blocking_reasons: tuple[str, ...]
@@ -146,13 +150,16 @@ class SetupCandidate:
     stream_generations: tuple[tuple[str, int | None], ...]
     session_rth: bool
     market_data_ok: bool
+    reasons: tuple[Reason, ...]        # C9e: the same evidence as the three string tuples, structured
+    units_per_point: int | None        # grid units per index point (MNQ: 4) for human presentation
     mode: str = "HUMAN_APPROVAL"       # proposal only; there is no order path
     notes: tuple[str, ...] = EPISTEMIC_NOTES
     external_evidence: tuple[str, ...] = ()   # future memory/shadow/LLM evidence: informational only
 
     @property
     def is_actionable_proposal(self) -> bool:
-        return self.direction is not Direction.NONE and not self.blocking_reasons
+        return self.direction is not Direction.NONE and not any(
+            r.severity in (Severity.BLOCK, Severity.HOLD) for r in self.reasons)
 
 
 # ---------------------------------------------------------------------------- helpers
@@ -394,42 +401,57 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
 
     supporting: list[str] = []
     caution: list[str] = []
-    blocking: list[str] = [f"safety:{r.code}:{r.detail}" for r in safety.hard_block_reasons]
-    blocking += [f"hold:{r.code}:{r.detail}" for r in safety.temporary_hold_reasons]
+    blocking: list[str] = []
+    rs: list[Reason] = []
+    B, HO, CA, SU = Severity.BLOCK, Severity.HOLD, Severity.CAUTION, Severity.SUPPORT
+
+    def add(bucket: list[str], legacy: str, source: str, code: str, detail: str, sev: Severity) -> None:
+        bucket.append(legacy)
+        rs.append(Reason(source, code, detail, sev))
+
+    for r in safety.hard_block_reasons:
+        add(blocking, f"safety:{r.code}:{r.detail}", SRC_SAFETY, r.code, r.detail, B)
+    for r in safety.temporary_hold_reasons:
+        add(blocking, f"hold:{r.code}:{r.detail}", SRC_SAFETY, r.code, r.detail, HO)
 
     # evaluation lag (event time, deterministic in replay): never hidden, fail closed when stale
     tbar = ctx.bars_30s.latest
     trigger_end = tbar.end_s if tbar is not None else None
     lag_ms = None if trigger_end is None else (ctx.wall_ns - trigger_end * 1_000_000_000) // 1_000_000
     if lag_ms is None:
-        blocking.append("no_completed_30s_trigger_bar")
+        add(blocking, "no_completed_30s_trigger_bar", SRC_TIMING, "no_completed_30s_trigger_bar", "", B)
     elif lag_ms > cfg.max_evaluation_lag_ms:
-        blocking.append(f"trigger_evaluation_stale:{lag_ms}ms>{cfg.max_evaluation_lag_ms}ms")
+        add(blocking, f"trigger_evaluation_stale:{lag_ms}ms>{cfg.max_evaluation_lag_ms}ms", SRC_TIMING,
+            "trigger_evaluation_stale", f"{lag_ms} ms > {cfg.max_evaluation_lag_ms} ms", B)
 
     for a in (regime, setup, trigger):
         for c in a.conditions:
             if c.passed:
-                supporting.append(f"{a.stage}:{c.name}:{c.detail}")
+                add(supporting, f"{a.stage}:{c.name}:{c.detail}", a.stage, c.name, c.detail, SU)
     if regime.result == Regime.NEUTRAL.value:
-        blocking.append("regime_5m_neutral")
+        add(blocking, "regime_5m_neutral", regime.stage, "regime_5m_neutral", "", B)
         if any(c.detail == "rth_vwap_unavailable" for c in regime.conditions):
-            blocking.append("rth_vwap_unavailable")
+            add(blocking, "rth_vwap_unavailable", regime.stage, "rth_vwap_unavailable", "no RTH prints yet", B)
     elif setup.result == Direction.NONE.value:
-        blocking.append("setup_1m_not_confirmed")
+        add(blocking, "setup_1m_not_confirmed", setup.stage, "setup_1m_not_confirmed", "", B)
     elif trigger.result == Direction.NONE.value:
-        blocking.append("trigger_30s_not_confirmed")
+        add(blocking, "trigger_30s_not_confirmed", trigger.stage, "trigger_30s_not_confirmed", "", B)
     for a in (regime, setup, trigger):
         for c in a.conditions:
             if not c.passed and a.result in (Regime.NEUTRAL.value, Direction.NONE.value):
-                blocking.append(f"{a.stage}:{c.name}:{c.status}:{c.detail}")
+                add(blocking, f"{a.stage}:{c.name}:{c.status}:{c.detail}", a.stage, c.name,
+                    f"{c.status}: {c.detail}", B)
 
     # bar-quality cautions (non-blocking flags)
     for bc, label in ((ctx.regime_5m, "5m"), (ctx.setup_1m, "1m"), (ctx.bars_30s, "30s")):
         f = bc.flags & _CAUTION_FLAGS
         if f:
-            caution.append(f"{label}_bars_flagged:{BarFlag(f).name}")
+            add(caution, f"{label}_bars_flagged:{BarFlag(f).name}", SRC_BAR_QUALITY, f"{label}_bars_flagged",
+                str(BarFlag(f).name), CA)
     if tbar is not None and tbar.unknown_volume > tbar.buy_volume + tbar.sell_volume:
-        caution.append("30s_trigger_bar_mostly_unknown_aggressor")
+        add(caution, "30s_trigger_bar_mostly_unknown_aggressor", trigger.stage,
+            "trigger_bar_mostly_unknown_aggressor",
+            f"unknown={tbar.unknown_volume} buy={tbar.buy_volume} sell={tbar.sell_volume} (never redistributed)", CA)
 
     direction = Direction.NONE
     sup = opp = psup = 0
@@ -439,31 +461,41 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
         # full-session VWAP (incl. overnight) is context/caution only for RTH entries
         fs = ctx.session.vs_vwap_num if ctx.session.vs_vwap_den else None
         if fs is not None and _sign_ok(fs, want) is False:
-            caution.append(f"mid_{'below' if want is Regime.LONG else 'above'}_full_session_vwap:"
-                           f"{ctx.session.vs_vwap_num}/{ctx.session.vs_vwap_den} units")
+            side = "below" if want is Regime.LONG else "above"
+            add(caution, f"mid_{side}_full_session_vwap:{ctx.session.vs_vwap_num}/{ctx.session.vs_vwap_den} units",
+                SRC_SESSION, f"mid_{side}_full_session_vwap",
+                f"{ctx.session.vs_vwap_num}/{ctx.session.vs_vwap_den} units", CA)
         against = Vote.SHORT if want is Regime.LONG else Vote.LONG
         for c in flow:
             if c.vote.value == want.value:
                 sup += 1
                 psup += c.role == "primary"
-                supporting.append(f"orderflow_{c.role}:{c.name}:{c.detail}")
+                add(supporting, f"orderflow_{c.role}:{c.name}:{c.detail}", SRC_ORDERFLOW, f"{c.name}_supports",
+                    f"{c.role}: {c.detail}", SU)
             elif c.vote is against:
                 opp += 1
-                caution.append(f"orderflow_opposes_{c.role}:{c.name}:{c.detail}")
+                add(caution, f"orderflow_opposes_{c.role}:{c.name}:{c.detail}", SRC_ORDERFLOW, f"{c.name}_opposes",
+                    f"{c.role}: {c.detail}", CA)
             elif c.vote is Vote.UNAVAILABLE:
-                caution.append(f"orderflow_unavailable:{c.name}:{c.detail}")
+                add(caution, f"orderflow_unavailable:{c.name}:{c.detail}", SRC_ORDERFLOW, f"{c.name}_unavailable",
+                    f"{c.role}: {c.detail}", CA)
         if psup < cfg.min_primary_confirmations:
-            blocking.append(f"insufficient_primary_orderflow_confirmation:{psup}/{cfg.min_primary_confirmations}"
-                            + (f" ({sup - psup} secondary only)" if sup > psup else ""))
+            extra = f" ({sup - psup} secondary only)" if sup > psup else ""
+            add(blocking, f"insufficient_primary_orderflow_confirmation:{psup}/{cfg.min_primary_confirmations}" + extra,
+                SRC_ORDERFLOW, "insufficient_primary_orderflow_confirmation",
+                f"{psup}/{cfg.min_primary_confirmations} primary{extra}", B)
         if opp and opp >= sup:
-            blocking.append(f"conflicting_orderflow_evidence:{sup}_supporting_vs_{opp}_opposing")
+            add(blocking, f"conflicting_orderflow_evidence:{sup}_supporting_vs_{opp}_opposing", SRC_ORDERFLOW,
+                "conflicting_orderflow_evidence", f"{sup} supporting vs {opp} opposing", B)
         risk, why = propose_risk(ctx, cfg, want)
         if risk is None:
-            blocking.append(f"risk:{why}")
+            code, _, detail = why.partition(":")
+            add(blocking, f"risk:{why}", SRC_RISK, code, detail, B)
         elif not risk.within_max_risk:
-            blocking.append(f"structural stop exceeds maximum risk: {risk.required_stop_units / ctx.price.units_per_point:g} "  # type: ignore[operator]
-                            f"pt > {cfg.max_stop_points:g} pt")
-        if not blocking:
+            req = f"{risk.required_stop_units / ctx.price.units_per_point:g}"  # type: ignore[operator]
+            add(blocking, f"structural stop exceeds maximum risk: {req} pt > {cfg.max_stop_points:g} pt", SRC_RISK,
+                "structural_stop_exceeds_max_risk", f"{req} pt > {cfg.max_stop_points:g} pt", B)
+        if not any(r.severity in (B, HO) for r in rs):       # structured reasons decide, never the strings
             direction = Direction(want.value)
 
     q = ctx.quality
@@ -486,7 +518,8 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
                     ("metrics_epoch", q.metrics_epoch), ("structure_epoch", q.structure_epoch),
                     ("pattern_epoch", q.pattern_epoch), ("book_epoch", q.book_epoch)),
         stream_generations=tuple((name, gen) for name, gen, _ in q.streams),
-        session_rth=ctx.session.in_rth, market_data_ok=q.market_data_ok, mode=cfg.mode,
+        session_rth=ctx.session.in_rth, market_data_ok=q.market_data_ok,
+        reasons=tuple(dict.fromkeys(rs)), units_per_point=ctx.price.units_per_point, mode=cfg.mode,
     )
 
 

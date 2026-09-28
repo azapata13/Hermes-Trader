@@ -402,6 +402,42 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   keep their stage prefix (`safety:`, `hold:`, `risk:`, `regime_5m:` …); lifecycle transitions use the bare
   SafetyPolicy codes.
 
+- **C9e human-approval payload preparation** (`hermes/decision/reasons.py`, `approval.py`): one reason
+  shape everywhere in the payload — `Reason(source, code, detail, severity)`; `source` from a fixed
+  vocabulary (safety, timing, regime_5m, setup_1m, trigger_30s, bar_quality, session, orderflow, risk at
+  creation; lifecycle after creation; approval for the approval-time gate and SafetyPolicy codes; response
+  for human-response checks), `code` a
+  validated snake_case machine code (SafetyPolicy codes stay bare), `detail` free text never parsed,
+  `severity` BLOCK > HOLD > CAUTION > SUPPORT > INFO. `SetupCandidate.reasons` carries the structured twin
+  of every legacy supporting/caution/blocking string. The legacy strings are DEPRECATED: kept only for
+  internal stats / backward compatibility until after C9f live validation, and never parsed for any
+  decision (tested by scrambling them). Order-flow codes are `<component>_supports|_opposes|_unavailable`.
+  `ApprovalPayload` (schema 3) has ONE `reasons` tuple ordered by severity (stable), `denied_reasons`,
+  `codes(severity=, source=)`, `units_per_point`, `safety_evaluated_wall_ns`, and two deterministic ids:
+  `proposal_id` ("P" + 23 hex) over the immutable proposal facts only (setup_id, instrument, direction,
+  trigger bar end, entry, invalidation + source, stop, risk, creation-time timeframe summaries, order-flow
+  evidence and creation reasons, expiry) — unchanged by time passing, lifecycle status, holds,
+  re-observed safety or annotations, changed iff the proposal changes; and `approval_view_id` ("V" + 23
+  hex) over the exact view shown (proposal_id, status, approval_allowed_now, approval-time SafetyResult,
+  every reason) — changes whenever the view changes. `verify_proposal_id` / `verify_approval_view_id`
+  detect tampering. `payload_to_dict` is a plain-JSON canonical form. `render_approval_text` is a
+  deterministic plain-text view: setup_id / proposal_id / approval_view_id, lifecycle status, approval
+  allowed now, entry, stop, risk pt and $, structural invalidation + source, "Take-profit: NONE", trigger
+  bar end, expiry with seconds remaining at view time, separate BLOCKERS / TEMPORARY HOLDS (always shown,
+  "none" when empty) / CAUTIONS / SUPPORTING EVIDENCE / INFO sections, 5 m / 1 m / 30 s context, every
+  order-flow vote, MBP limits and "Hermès sends no order"; no global confidence score exists or is shown.
+  `HumanApprovalResponse` (`hermes/decision/response.py`) is a PURE immutable record (action ENTER |
+  REJECT, setup_id, proposal_id, approval_view_id, response event time / seq, optional note ≤ 500 chars):
+  it sends nothing, mutates nothing, imports no broker/execution code (isolation test) and
+  `authorizes_execution` is hard-wired False — ENTER is human intent only. `response_matches_view` checks
+  it against the view shown (ids, tampering, ENTER on a non-approvable view). `execution_prerequisites`
+  documents as code what a FUTURE execution layer would need — human ENTER + the same proposal_id still
+  ACTIONABLE + a FRESH passing approval-time SafetyResult for this setup_id not older than the response
+  or the record + a RiskEligibilityPolicy + an enabled execution layer — and is never satisfiable in
+  Phase C9 (`risk_eligibility_policy_not_implemented`, `execution_layer_disabled`). An old
+  `approval_allowed_now=True` is never trusted. Nothing is sent: no Slack, no network, no broker;
+  building/rendering changes no state, and ids + texts are identical live and in two replays (tested).
+
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 
 Tape (bounded, BUY/SELL/UNKNOWN with method + confidence; delta split buy/sell/unknown),

@@ -200,7 +200,7 @@ def test_transient_crossed_book_holds_approval_without_ending_the_candidate():
     assert [h.code for h in r.temporary_hold_reasons] == ["crossed_book_transition"]
     assert r.transitions == () and r.candidate is rec.candidate
     p = approval_payload(r)
-    assert p.actionable and not p.approval_allowed_now and p.temporary_hold_reasons
+    assert p.actionable and not p.approval_allowed_now and "crossed_book_transition" in p.codes(source="lifecycle")
     lv.sc.depth(DEPTH, 0, 1, 1, price(entry - 1), 10)                      # coherent VALID book again
     lv.pump()
     r2 = lv.lc.get(rec.setup_id)

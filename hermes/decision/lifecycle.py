@@ -38,6 +38,7 @@ from enum import Enum
 
 from hermes.config import DecisionConfig
 from hermes.decision.candidate import Direction, SetupCandidate
+from hermes.decision.reasons import SRC_TIMING, Severity
 from hermes.decision.safety import (
     PURPOSE_LIFECYCLE,
     SafetyPolicy,
@@ -128,7 +129,8 @@ def initial_record(c: SetupCandidate, cfg: DecisionConfig) -> CandidateRecord:
         # Hard safety failures (other than the authorization window) => BLOCKED. Outside the
         # authorized window or a transient non-priceable book at creation => NONE (no candidate here).
         hard_non_window = bool(sr.hard_block_reasons) and not sr.only_window_blocks
-        stale = any(r.code in ("trigger_evaluation_stale", "no_completed_30s_trigger_bar") for r in reasons)
+        # decided from the STRUCTURED reasons (legacy strings are never parsed for decisions)
+        stale = any(r.source == SRC_TIMING and r.severity is Severity.BLOCK for r in c.reasons)
         status = CandidateStatus.BLOCKED if hard_non_window or stale else CandidateStatus.NONE
     exp = None if c.trigger_bar_end_s is None else (c.trigger_bar_end_s + cfg.candidate_ttl_seconds) * _S
     return CandidateRecord(LIFECYCLE_SCHEMA_VERSION, setup_id(c), c, status, reasons, c.seq, c.wall_ns, exp,
