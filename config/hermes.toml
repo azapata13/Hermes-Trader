@@ -111,3 +111,11 @@ snapshot_bars = 10
 include_past_limit = false
 include_unreported = false
 allowed_special_conditions = ""  # comma separated; other special conditions are excluded (counted)
+
+[decision]
+# C9 decision context / setup candidates: EVIDENCE AND PROPOSALS ONLY. No order path exists.
+enabled = true
+mode = "HUMAN_APPROVAL"          # the only accepted value in Phase C9
+lookback_5m = 6                  # completed bars; each must be <= [bars].snapshot_bars
+lookback_1m = 10
+lookback_30s = 10

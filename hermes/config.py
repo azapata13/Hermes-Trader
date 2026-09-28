@@ -142,6 +142,20 @@ class BarsConfig:
     allowed_special_conditions: str = ""   # comma separated; prints with other conditions are excluded
 
 
+DECISION_MODES = ("HUMAN_APPROVAL",)   # the ONLY mode that exists in Phase C9 (no autonomous execution)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionConfig:
+    """C9 decision-context / setup-candidate layer. Produces evidence and proposals only; it has
+    no order path. Lookbacks are counted in COMPLETED bars and must fit in [bars].snapshot_bars."""
+    enabled: bool = True
+    mode: str = "HUMAN_APPROVAL"           # anything else is rejected at load time
+    lookback_5m: int = 6                   # 5 m regime/context window (30 min)
+    lookback_1m: int = 10                  # 1 m setup/local-structure window
+    lookback_30s: int = 10                 # 30 s execution-timing window
+
+
 @dataclass(frozen=True, slots=True)
 class HermesConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -155,6 +169,7 @@ class HermesConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     tape: TapeConfig = field(default_factory=TapeConfig)
     bars: BarsConfig = field(default_factory=BarsConfig)
+    decision: DecisionConfig = field(default_factory=DecisionConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -169,6 +184,7 @@ _SECTIONS: dict[str, type] = {
     "telemetry": TelemetryConfig,
     "tape": TapeConfig,
     "bars": BarsConfig,
+    "decision": DecisionConfig,
 }
 
 
@@ -288,6 +304,15 @@ def _validate(cfg: HermesConfig) -> None:
         raise ConfigError("[bars].close_grace_ms must be in [0, 10000]")
     if min(br.history_30s, br.history_1m, br.history_5m) < 1 or br.snapshot_bars < 0:
         raise ConfigError("[bars] history sizes must be >= 1 and snapshot_bars >= 0")
+
+    d = cfg.decision
+    if d.mode not in DECISION_MODES:
+        raise ConfigError(f"[decision].mode must be one of {DECISION_MODES} in Phase C9 "
+                          "(no autonomous execution path exists)")
+    for name in ("lookback_5m", "lookback_1m", "lookback_30s"):
+        v = getattr(d, name)
+        if not (1 <= v <= br.snapshot_bars):
+            raise ConfigError(f"[decision].{name} must be in [1, [bars].snapshot_bars={br.snapshot_bars}]")
 
     sub = cfg.subscriptions
     if cfg.book.require_bbo_confirmation and not sub.tick_by_tick_bid_ask:

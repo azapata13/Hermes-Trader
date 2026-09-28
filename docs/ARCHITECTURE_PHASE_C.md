@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C8 follow-through deadline fix applied on the C9 branch.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (decision context; C9a done).
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -299,6 +299,23 @@ until then, before the event's midpoint is applied; a deadline exactly at the ev
 Regression tests: `test_follow_through_never_uses_a_midpoint_from_after_the_horizon`,
 `test_deadline_exactly_at_book_event_sees_that_event` (three C8 tests that encoded the look-ahead were
 corrected). HASH_VERSION unchanged (summary structure unchanged); the code fingerprint changes.
+
+## 8e. C9 — Decision context and setup candidates (in progress)
+
+No order path, ever: `[decision].mode` accepts only `HUMAN_APPROVAL`; `hermes/decision/` may import
+only config/market/fingerprint code (safety test `tests/safety/test_decision_isolation.py`).
+
+- **C9a DecisionContext** (`hermes/decision/context.py`): pure function of an immutable
+  `MarketSnapshot` + `[decision]` config. Sections with `available`/`reason`: data quality (connection,
+  farm, 10197, not-live, alerts, contract, MDT, market_data_ok + reasons, book state/issues/epoch,
+  stream generations, tape/classifier/metrics/structure/pattern epochs, active bar-quality flags,
+  calendar), price (VALID-book mid_x2/best/spread/microprice; BBO and last trade reported separately),
+  label-free bar summaries for 5 m (regime/context), 1 m (setup/local structure), 30 s (timing) over
+  configurable lookbacks of COMPLETED bars (range, net change, up/down/flat bars, B/S/U volume,
+  known_delta, VWAP numerator, OR-ed flags, quality_ok), session (VWAP relation as exact num/den, RTH),
+  and the C7/C8 snapshots with their own availability. UNKNOWN volume is never redistributed; MBP
+  epistemic notes travel with every context. Not engine state → no HASH_VERSION bump; determinism
+  follows from snapshot determinism (tested, including replayed recordings).
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 
