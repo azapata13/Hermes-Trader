@@ -133,3 +133,6 @@ min_stop_points = 10.0           # required stop = max(10 pt, structural distanc
 max_stop_points = 12.0           # structure needing more => NONE (never a capped stop inside structure)
 point_value_usd = 2.0            # MNQ $2/pt (reporting only)
 candidate_history = 2880
+# ---- C9c candidate lifecycle (proposal validity only; no execution) ----
+candidate_ttl_seconds = 30       # valid until trigger bar end + 30 s (event time), then EXPIRED
+max_entry_drift_ticks = 8        # MNQ 8 ticks = 2 pt: beyond => STALE (never chase, never move entry/stop)

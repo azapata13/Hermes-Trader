@@ -173,6 +173,9 @@ class DecisionConfig:
     max_stop_points: float = 12.0          # structure needing more => NONE (never a capped, too-tight stop)
     point_value_usd: float = 2.0           # MNQ: $2 per point per contract (reporting only)
     candidate_history: int = 2880          # evaluations kept by the CandidateEngine (FIFO)
+    # ---- C9c candidate lifecycle / validity (no execution) ----
+    candidate_ttl_seconds: int = 30        # valid until trigger bar end + TTL (event time), then EXPIRED
+    max_entry_drift_ticks: int = 8         # |current ask/bid - proposed entry| > this => STALE (never chase)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +346,8 @@ def _validate(cfg: HermesConfig) -> None:
         raise ConfigError("[decision].max_evaluation_lag_ms must be >= 0")
     if d.stop_buffer_ticks < 0 or not (0 < d.min_stop_points <= d.max_stop_points):
         raise ConfigError("[decision] stop settings must satisfy buffer >= 0 and 0 < min_stop <= max_stop")
+    if d.candidate_ttl_seconds < 1 or d.max_entry_drift_ticks < 0:
+        raise ConfigError("[decision].candidate_ttl_seconds must be >= 1 and max_entry_drift_ticks >= 0")
     if d.point_value_usd <= 0 or d.candidate_history < 1:
         raise ConfigError("[decision].point_value_usd must be > 0 and candidate_history >= 1")
     for name in ("lookback_5m", "lookback_1m", "lookback_30s", "regime_bars_5m", "setup_bars_1m", "recent_window_bars_1m"):

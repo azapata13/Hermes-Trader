@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅).
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅, C9c candidate lifecycle ✅).
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -339,6 +339,29 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   (tested: identical market checkpoints with/without the decision layer). Replay supports read-only
   observers (`ReplayOptions.observers`). Future memory/shadow/learned/LLM evidence may only be attached as
   informational `external_evidence`; it can never remove a blocking reason.
+
+- **C9c candidate lifecycle** (`hermes/decision/lifecycle.py`, `driver.py`, `approval.py`): every candidate
+  gets a deterministic `setup_id` (instrument, direction, 5 m / 1 m window ends, 30 s trigger bar end,
+  structural invalidation; no clock, seq or randomness) and an immutable `CandidateRecord` with an explicit
+  status: NONE (no setup) · BLOCKED (safety gate at evaluation or later) · ACTIONABLE · EXPIRED (event time ≥
+  trigger bar end + `candidate_ttl_seconds`=30) · STALE (ask/bid drifted > `max_entry_drift_ticks`=8 from the
+  proposed entry) · INVALIDATED (best bid/ask or a new print reached the structural invalidation). Only
+  ACTIONABLE records change, only to a terminal status; nothing is revived, entry/invalidation/stop are never
+  moved, risk is never widened. Per event, while a candidate is ACTIONABLE, the driver re-checks (read-only)
+  safety first: connection, not-live, 10197, farm, alerts, VALID book, unchanged stream generations and
+  continuity epochs, no active data gap, RTH, uniform grid, classification context, market_data_ok —
+  BLOCKED > INVALIDATED > STALE > EXPIRED. Lifecycle status is separate from `approval_allowed_now`: while
+  the authoritative book is still VALID and continuity-safe but the current depth snapshot is momentarily
+  non-priceable (crossed / unsorted / empty side between row updates), the candidate stays ACTIONABLE with
+  `approval_allowed_now=False` and a `temporary_hold_reasons` entry (e.g. `crossed_book_transition`); no
+  entry drift and no book-based invalidation are judged from that snapshot and no bid/ask is synthesised.
+  Evaluation resumes on the next coherent VALID book (not a revival). Book SUSPECT/STALE, epoch change, data
+  gap, stream loss/resubscription or non-live data are final BLOCKED. Touch counts: LONG coherent best bid ≤
+  invalidation or an ELIGIBLE print ≤ it (SHORT inverse); eligible prints count even during a hold. Status reasons are structured (`code`, `detail`). `annotate()` adds informational evidence
+  (future memory/shadow/LLM) and can never change a status. `ApprovalPayload` is an immutable view for the
+  future HUMAN_APPROVAL workflow (entry, stop, risk, invalidation + source, created/expiry, evaluation lag,
+  5 m/1 m/30 s summaries, order-flow evidence, reasons, session/continuity, MBP notes, status); building it
+  sends nothing. Lifecycle state has its own rolling fingerprint; the market hash is unchanged (tested).
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 

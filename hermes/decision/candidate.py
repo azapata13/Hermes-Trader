@@ -581,27 +581,3 @@ class CandidateEngine:
         return digest(("hermes-decision", CANDIDATE_SCHEMA_VERSION, self.cfg, self._last_completed,
                        self.stats.evaluations, self.stats.long, self.stats.short, self.stats.none,
                        self._chain))
-
-
-class CandidateDriver:
-    """Feeds a CandidateEngine from a MarketEngine: after each raw event it checks (O(instruments))
-    whether a 30 s bar completed and, only then, builds ONE immutable snapshot and evaluates.
-    Same consumer interface as the live pipeline / replay loop (``after_event``). Read-only on
-    the MarketEngine; never mutates market state."""
-
-    def __init__(self, engine, candidates: CandidateEngine) -> None:
-        self.engine = engine
-        self.candidates = candidates
-        self.snapshots_built = 0
-
-    def completed_30s(self) -> int:
-        iid = self.candidates.instrument_id
-        insts = self.engine.instruments
-        inst = insts.get(iid) if iid is not None else (next(iter(insts.values())) if insts else None)
-        return inst.bars.completed[30] if inst is not None and inst.bars is not None else 0
-
-    def after_event(self, raw, events, now_mono_ns: int) -> SetupCandidate | None:
-        if not self.candidates.due(self.completed_30s()):
-            return None
-        self.snapshots_built += 1
-        return self.candidates.on_snapshot(self.engine.snapshot())

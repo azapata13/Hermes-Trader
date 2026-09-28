@@ -8,7 +8,6 @@ import pytest
 
 from hermes.config import BarsConfig, ConfigError, DecisionConfig, config_from_mapping
 from hermes.decision.candidate import (
-    CandidateDriver,
     CandidateEngine,
     Direction,
     Regime,
@@ -18,6 +17,7 @@ from hermes.decision.candidate import (
     orderflow_components,
 )
 from hermes.decision.context import build_decision_context
+from hermes.decision.driver import CandidateDriver
 from hermes.market.snapshot import MarketSnapshot
 from tests.support import BBO, DEPTH, TICK, TRADES, Harness, RawScript, write_hrec
 from tests.unit.test_replay import WEEK, ticks
