@@ -10,10 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from hermes.market.events import ConnectionState, Stream, StreamStatus
+from hermes.market.absorption import AbsorptionSnapshot
 from hermes.market.bars import BarsSnapshot
 from hermes.market.metrics import MetricsSnapshot
 from hermes.market.orderbook import BookSnapshot
+from hermes.market.patterns import PatternSnapshot
 from hermes.market.sessions import SessionSnapshot
+from hermes.market.structure import StructureSnapshot
 from hermes.market.tape import TapeSnapshot
 
 
@@ -63,6 +66,9 @@ class InstrumentSnapshot:
     bars: BarsSnapshot | None = None   # C5 forming + latest N completed bars per timeframe, quality counters
     session: SessionSnapshot | None = None   # C5 exchange session context (session / RTH / overnight / previous)
     metrics: MetricsSnapshot | None = None   # C7 deterministic order-flow measurements
+    structure: StructureSnapshot | None = None  # C8 MBP structure measurements
+    patterns: PatternSnapshot | None = None     # C8 sweeps + follow-through measurements
+    absorption: AbsorptionSnapshot | None = None  # C8 pure derived MBP context
 
 
 @dataclass(frozen=True, slots=True)

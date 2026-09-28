@@ -23,14 +23,17 @@ from typing import Callable
 from hermes.config import BarsConfig, BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
 from hermes.ibkr.errors import SUBSCRIPTION_FATAL
 from hermes.market import events as M
+from hermes.market.absorption import derive_absorption_context
 from hermes.market.events import AnomalyKind, ConnectionState, ErrorClass, Stream, StreamStatus
 from hermes.market.bars import BarEngine, BarFlag, TradeDisposition
 from hermes.market.classify import QuoteState, TradeClassifier
 from hermes.market.health import ConflictPhase, ConflictRecovery, StreamState
 from hermes.market.metrics import MetricsEngine
 from hermes.market.orderbook import BookState, InvalidationReason, OrderBook
+from hermes.market.patterns import PatternEngine
 from hermes.market.pricegrid import PriceGrid
 from hermes.market.sessions import SessionCalendar, SessionTracker
+from hermes.market.structure import StructureEngine
 from hermes.market.tape import ClassifiedTrade, Tape, TapeSnapshot
 from hermes.market.snapshot import (
     BboSnapshot,
@@ -105,6 +108,8 @@ class InstrumentState:
     required: tuple[Stream, ...]
     streams: dict[Stream, StreamState]
     metrics: MetricsEngine
+    structure: StructureEngine
+    patterns: PatternEngine
     local_symbol: str = ""
     con_id: int | None = None
     contract_state: str = "pending"
@@ -206,6 +211,8 @@ class MarketEngine:
                 instrument_id=instrument_id, required=self._required,
                 streams={s: StreamState(s) for s in MARKET_STREAMS},
                 metrics=MetricsEngine(instrument_id),
+                structure=StructureEngine(instrument_id),
+                patterns=PatternEngine(instrument_id),
                 tape=Tape(self._tape_cfg), classifier=TradeClassifier(self._tape_cfg),
                 bars=BarEngine(self._bars_cfg, instrument_id) if self._bars_on else None,
                 sessions=SessionTracker(self._bars_cfg.close_grace_ms))
@@ -241,14 +248,19 @@ class MarketEngine:
         inst = self.instruments[ev.instrument_id]
         inst.streams[Stream.DEPTH].on_data(ev.recv_mono_ns)
         if inst.book is not None:
-            inst.book.apply(ev.side, ev.op, ev.position, ev.price_units, ev.size, ev.recv_mono_ns)
-            inst.metrics.observe_book(inst.book.snapshot(), ev.recv_mono_ns, depth_event=True)
+            changes = inst.book.apply(ev.side, ev.op, ev.position, ev.price_units, ev.size, ev.recv_mono_ns)
+            book = inst.book.snapshot()
+            inst.metrics.observe_book(book, ev.recv_mono_ns, depth_event=True)
+            inst.structure.observe_book(book, changes, ev.recv_mono_ns)
+            inst.patterns.observe_book(book, ev.recv_mono_ns)
 
     def _on_depth_reset(self, ev: M.DepthResetEvent) -> None:
         inst = self.instruments[ev.instrument_id]
         if inst.book is not None:
             inst.book.reset(ev.reason, ev.recv_mono_ns)
         inst.metrics.break_book(f"depth_reset:{ev.reason.value}", ev.recv_mono_ns)
+        inst.structure.break_book(f"depth_reset:{ev.reason.value}", ev.recv_mono_ns)
+        inst.patterns.break_book(f"depth_reset:{ev.reason.value}", ev.recv_mono_ns)
 
     def _on_bbo(self, ev: M.BboEvent) -> None:
         inst = self.instruments[ev.instrument_id]
@@ -257,7 +269,10 @@ class MarketEngine:
         inst.metrics.on_bbo(ev.recv_mono_ns)
         if inst.book is not None:
             inst.book.on_bbo(ev.bid_units, ev.ask_units, ev.recv_mono_ns)
-            inst.metrics.observe_book(inst.book.snapshot(), ev.recv_mono_ns)
+            book = inst.book.snapshot()
+            inst.metrics.observe_book(book, ev.recv_mono_ns)
+            inst.structure.observe_book(book, (), ev.recv_mono_ns)
+            inst.patterns.observe_book(book, ev.recv_mono_ns)
         inst.classifier.on_quote(QuoteState(ev.bid_units, ev.ask_units, ev.bid_size, ev.ask_size, ev.seq,  # type: ignore[union-attr]
                                             ev.generation, ev.recv_mono_ns, ev.recv_wall_ns, ev.exch_ts_s))
 
@@ -282,6 +297,9 @@ class MarketEngine:
             ref_quote_age_ns=c.ref_quote_age_ns)
         inst.tape.append(classified)  # type: ignore[union-attr]
         inst.metrics.on_trade(classified)
+        if inst.book is not None:
+            inst.structure.on_trade(classified, inst.book.snapshot())
+            inst.patterns.on_trade(classified, inst.book.snapshot())
         bars = inst.bars
         if bars is not None:
             ts = ev.exch_ts_s if ev.exch_ts_s > 0 else ev.recv_wall_ns // _S
@@ -395,14 +413,20 @@ class MarketEngine:
             st.on_requested(ev.generation, ev.seq, ev.recv_mono_ns)
             if ev.stream is Stream.DEPTH and inst.book is not None:
                 inst.book.reset(M.ResetReason.RESUBSCRIBE, ev.recv_mono_ns)
+                inst.structure.break_book("depth_resubscribe", ev.recv_mono_ns)
+                inst.patterns.break_book("depth_resubscribe", ev.recv_mono_ns)
             elif ev.stream is Stream.BBO:
                 inst.bbo = None
                 inst.classifier.reset_quotes()  # type: ignore[union-attr]
+                inst.structure.break_book("bbo_resubscribe", ev.recv_mono_ns)
+                inst.patterns.break_book("bbo_resubscribe", ev.recv_mono_ns)
                 if inst.book is not None:
                     inst.book.set_bbo_unavailable(ev.recv_mono_ns)
             elif ev.stream is Stream.TRADES:
                 inst.classifier.reset_tick()  # type: ignore[union-attr]
                 inst.tape.new_epoch()  # type: ignore[union-attr]
+                inst.structure.break_book("trades_resubscribe", ev.recv_mono_ns)
+                inst.patterns.break_trades("trades_resubscribe", ev.recv_mono_ns)
                 b = inst.bars
                 if b is not None:
                     if b.armed:                  # RE-subscription: prints may have been missed
@@ -512,6 +536,8 @@ class MarketEngine:
         for inst in self.instruments.values():
             if inst.book is not None:
                 inst.book.invalidate(reason, now)
+            inst.structure.break_book(reason.value, now)
+            inst.patterns.break_book(reason.value, now)
 
     def _on_heartbeat(self, ev: M.HeartbeatEvent) -> None:
         pass  # liveness is tracked by telemetry (last_mono_ns); nothing to mutate
@@ -521,9 +547,14 @@ class MarketEngine:
         for inst in self.instruments.values():
             if inst.book is not None:
                 inst.book.evaluate(now)
-                inst.metrics.observe_book(inst.book.snapshot(), now)
+                book = inst.book.snapshot()
+                inst.metrics.observe_book(book, now)
+                inst.structure.observe_book(book, (), now)
+                inst.patterns.observe_book(book, now)
             inst.tape.evict_by_age(now)  # type: ignore[union-attr]
             inst.metrics.advance(now)
+            inst.structure.advance(now)
+            inst.patterns.advance(now)
         before = self.conflict.phase
         self.conflict.on_tick(now)
         if before is not self.conflict.phase:
@@ -571,6 +602,8 @@ class MarketEngine:
             return   # anomaly from a replaced generation: counted only
         if ev.stream is Stream.DEPTH and ev.kind in _DEPTH_ANOMALIES and inst.book is not None:
             inst.book.invalidate(InvalidationReason.DATA_ANOMALY, ev.recv_mono_ns)
+            inst.structure.break_book("depth_data_anomaly", ev.recv_mono_ns)
+            inst.patterns.break_book("depth_data_anomaly", ev.recv_mono_ns)
         elif ev.kind is AnomalyKind.DELAYED_TICK:
             self._set_not_live(ev.seq, ev.recv_mono_ns)
 
@@ -695,6 +728,8 @@ class MarketEngine:
                 tuple((st.generation, st.status, st.error_active) for st in inst.streams.values()),
                 self._tape_token(inst),
                 inst.metrics.token(),
+                inst.structure.token(),
+                inst.patterns.token(),
                 inst.bars.token() if inst.bars is not None else None,
                 inst.sessions.token(),  # type: ignore[union-attr]
             ))
@@ -732,6 +767,9 @@ class MarketEngine:
                 StreamSnapshot(s, st.generation, self.effective_status(st), st.last_event_mono_ns, st.events,
                                st.requests, st.last_error_code)
                 for s, st in inst.streams.items())
+            structure = inst.structure.snapshot()
+            patterns = inst.patterns.snapshot()
+            absorption = derive_absorption_context(structure, patterns)
             insts.append(InstrumentSnapshot(
                 instrument_id=inst.instrument_id, local_symbol=inst.local_symbol, con_id=inst.con_id,
                 contract_state=inst.contract_state,
@@ -741,7 +779,10 @@ class MarketEngine:
                 tape=self.tape_snapshot(inst),
                 bars=inst.bars.snapshot(self._bars_cfg.snapshot_bars) if inst.bars is not None else None,
                 session=inst.sessions.snapshot(),  # type: ignore[union-attr]
-                metrics=inst.metrics.snapshot()))
+                metrics=inst.metrics.snapshot(),
+                structure=structure,
+                patterns=patterns,
+                absorption=absorption))
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,

@@ -27,7 +27,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-HASH_VERSION = 2
+HASH_VERSION = 4
 LATEST_TRADES = 5
 
 # Deterministic-path sources: their content defines "same code" for live-vs-replay equivalence.
@@ -35,7 +35,7 @@ _CODE_FILES = (
     "hermes/ibkr/raw_events.py", "hermes/ibkr/normalizer.py", "hermes/ibkr/contracts.py", "hermes/ibkr/codes.py",
     "hermes/ibkr/errors.py", "hermes/ibkr/market_rules.py", "hermes/market/events.py", "hermes/market/pricegrid.py",
     "hermes/market/orderbook.py", "hermes/market/health.py", "hermes/market/classify.py", "hermes/market/tape.py",
-    "hermes/market/metrics.py",
+    "hermes/market/metrics.py", "hermes/market/structure.py", "hermes/market/patterns.py", "hermes/market/absorption.py",
     "hermes/market/bars.py", "hermes/market/sessions.py", "hermes/market/engine.py", "hermes/market/snapshot.py",
     "hermes/replay/fingerprint.py", "hermes/replay/checkpoints.py",
 )
@@ -120,6 +120,8 @@ def _instrument(engine, inst) -> tuple:
         bars_part,
         inst.sessions.snapshot() if inst.sessions is not None else None,
         inst.metrics.fingerprint_state(),
+        inst.structure.fingerprint_state(),
+        inst.patterns.fingerprint_state(),
     )
 
 
