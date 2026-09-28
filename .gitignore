@@ -7,3 +7,7 @@ logs/
 recordings/
 *.log
 .DS_Store
+# Local secrets
+.env
+.env.*
+!.env.example

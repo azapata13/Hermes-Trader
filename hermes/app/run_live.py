@@ -28,8 +28,11 @@ import hermes
 from hermes.config import ConfigError, HermesConfig, load_config, DEFAULT_CONFIG_PATH
 from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
-from hermes.decision.approval import render_approval_text
+from hermes.decision.approval import current_approval_payload, render_approval_text
 from hermes.decision.runtime import DecisionRuntime, JournalKind, JournalRecord
+from hermes.slack.bridge import SlackApprovalBridge
+from hermes.slack.journal import ApprovalJournal
+from hermes.slack.socket_mode import SlackConfigError, SlackSettings, SlackSocketModeTransport
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.adapter import RawPipeline
 from hermes.ibkr.gateway import RequestGateway
@@ -47,6 +50,15 @@ HERMES_VERSION = hermes.__version__
 log = logging.getLogger("hermes.app")
 dlog = logging.getLogger("hermes.decision")
 _REPO = Path(__file__).resolve().parents[2]
+_SLACK_VIEW_KINDS = frozenset({
+    JournalKind.APPROVAL_VIEW_CREATED,
+    JournalKind.TEMPORARY_HOLD_ENTERED,
+    JournalKind.TEMPORARY_HOLD_CLEARED,
+    JournalKind.CANDIDATE_BLOCKED,
+    JournalKind.CANDIDATE_STALE,
+    JournalKind.CANDIDATE_INVALIDATED,
+    JournalKind.CANDIDATE_EXPIRED,
+})
 
 
 def git_commit() -> str:
@@ -132,10 +144,32 @@ class LiveRuntime:
         self.checkpoint_file: Path | None = None
         # C9f: the SAME decision runtime as replay, as a read-only consumer AFTER the checkpointer
         # (replay runs it after the checkpointer too). Proposals only: HUMAN_APPROVAL, no order path.
+        self.slack_bridge: SlackApprovalBridge | None = None
+        self.slack_config_error: str | None = None
         self.decisions: DecisionRuntime | None = (
             DecisionRuntime(self.engine, cfg.decision, on_record=self._on_decision) if cfg.decision.enabled else None)
         if self.decisions is not None:
             self.pipeline.consumers.append(self.decisions)
+            try:
+                slack_settings = SlackSettings.from_env()
+            except SlackConfigError as exc:
+                self.slack_config_error = str(exc)
+                log.error("Slack disabled by configuration error: %s", exc)
+            else:
+                if slack_settings is not None:
+                    journal_path = os.environ.get("HERMES_SLACK_JOURNAL")
+                    if not journal_path:
+                        journal_path = str(Path(cfg.telemetry.log_directory).expanduser() / "human_approvals.jsonl")
+                    self.slack_bridge = SlackApprovalBridge(
+                        self.decisions,
+                        self.engine,
+                        cfg.decision,
+                        SlackSocketModeTransport(slack_settings),
+                        ApprovalJournal(journal_path),
+                    )
+                    # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
+                    # AFTER DecisionRuntime has applied the current market event.
+                    self.pipeline.consumers.append(self.slack_bridge)
         self.decision_file: Path | None = None
         self.supervisor = Supervisor(cfg, self.pipeline, self.gateway, self.session)
         self.max_msg_queue = 0
@@ -147,6 +181,8 @@ class LiveRuntime:
     # ------------------------------------------------------------------ lifecycle
     def run(self, duration_s: float | None = None, install_signals: bool = True) -> dict[str, Any]:
         self.start_recording()
+        if self.slack_bridge is not None:
+            self.slack_bridge.start()
         if install_signals:
             self.supervisor.install_signal_handlers()
         self.heartbeat.start()
@@ -169,6 +205,8 @@ class LiveRuntime:
         self.checkpointer.finalize()
         if self.decisions is not None:
             self.decisions.finalize()
+        if self.slack_bridge is not None:
+            self.slack_bridge.close()
         self.reporter.stop()
         if self.recorder is not None:
             self.recorder.stop()
@@ -198,6 +236,26 @@ class LiveRuntime:
                   (" " + ",".join(blocks)) if blocks else "")
         if view is not None and r.kind is JournalKind.APPROVAL_VIEW_CREATED:
             dlog.info("HUMAN_APPROVAL view (inspection only; Hermès sends no order):\n%s", render_approval_text(view))
+
+        # D1: Slack is an asynchronous adapter. Build a fresh immutable approval view only on
+        # meaningful candidate transitions (rare), then enqueue it. No Slack/network call happens here.
+        bridge = self.slack_bridge
+        if bridge is not None and r.kind in _SLACK_VIEW_KINDS:
+            slack_view = view
+            if slack_view is None and r.setup_id is not None and self.decisions is not None:
+                rec = self.decisions.driver.lifecycle.get(r.setup_id)
+                if rec is not None and rec.candidate.direction.value != "NONE":
+                    try:
+                        slack_view = current_approval_payload(
+                            self.engine,
+                            rec,
+                            self.cfg.decision,
+                            now_wall_ns=r.wall_ns,
+                            instrument_id=rec.candidate.instrument_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - Slack must never stop market processing
+                        log.exception("could not build Slack approval view: %s", exc)
+            bridge.publish_decision(r, slack_view)
 
     def _save_checkpoints(self) -> None:
         """Persist live checkpoints next to the recording (never on the dispatch thread)."""
@@ -310,6 +368,12 @@ class LiveRuntime:
         rep["gateway"] = {"sent": self.gateway.sent, "rate_limited": self.gateway.rate_limited,
                           "failed": self.gateway.failed}
         rep["session_phase"] = self.session.phase.value
+        if self.slack_bridge is not None:
+            rep["slack"] = self.slack_bridge.summary()
+        elif self.slack_config_error is not None:
+            rep["slack"] = {"enabled": False, "config_error": self.slack_config_error}
+        else:
+            rep["slack"] = {"enabled": False}
         d = self.decisions
         if d is not None:
             last = d.journal[-1] if d.journal else None     # list append is atomic; read-only view
@@ -395,6 +459,9 @@ class LiveRuntime:
             "connection_before_shutdown": snap.connection.value if snap is not None else None,
             "live_data_confirmed": bool(inst and inst.market_data_type == 1 and self.pipeline.ever_market_data_ok),
             "read_only_violations": violations,
+            "slack": (self.slack_bridge.summary() if self.slack_bridge is not None else
+                      {"enabled": False, **({"config_error": self.slack_config_error}
+                                           if self.slack_config_error is not None else {})}),
             "hermes_version": HERMES_VERSION, "git_commit": git_commit(), "code_fingerprint": fp.code_fingerprint(),
             **dec,
         }

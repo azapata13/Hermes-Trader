@@ -10,6 +10,7 @@ dependencies = ["msgpack==1.2.2", "tzdata==2026.4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6.100"]
+slack = ["slack-bolt==1.30.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
