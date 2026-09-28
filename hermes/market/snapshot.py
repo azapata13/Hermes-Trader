@@ -73,6 +73,7 @@ class InstrumentSnapshot:
     # whole number of units; MNQ: 4 units per point, 1 unit per tick)
     units_per_point: int | None = None
     tick_units: int | None = None
+    required_streams: tuple[Stream, ...] = ()   # streams whose health market_data_ok requires
 
 
 @dataclass(frozen=True, slots=True)

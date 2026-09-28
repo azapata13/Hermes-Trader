@@ -123,7 +123,9 @@ lookback_30s = 10
 regime_bars_5m = 2               # 5 m regime: completed bars
 setup_bars_1m = 3                # 1 m setup: completed bars
 recent_window_bars_1m = 3        # rolling-window structural extreme (NOT a pivot): last N completed 1 m bars
-entry_hours = "RTH_ONLY"         # RTH from IBKR liquidHours; outside => NONE (outside_authorized_entry_hours)
+entry_policy = "RTH_ONLY"        # RTH from IBKR liquidHours; outside => NONE (outside_authorized_entry_hours)
+opening_buffer_seconds = 0       # authorized window [RTH start + opening, RTH end - closing): ZERO until calibrated
+closing_buffer_seconds = 0
 orderflow_components = "ofi,trade_flow,microprice,sweep_follow,absorption_compatible"
 orderflow_window_s = 5
 min_primary_confirmations = 1    # PRIMARY (ofi, trade_flow, sweep_follow); microprice/absorption are secondary only

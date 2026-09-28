@@ -120,7 +120,7 @@ def test_long_candidate_is_fully_explained(long_run):
     assert any(r.startswith("orderflow_primary:") for r in c.supporting_reasons)
     assert any("mid_above_rth_vwap" in r for r in c.supporting_reasons)
     assert 0 <= c.evaluation_lag_ms <= 2000 and c.primary_supporting >= 1
-    assert c.session_rth and c.market_data_ok and all(g.passed for g in c.gates)
+    assert c.session_rth and c.market_data_ok and c.safety.allowed and c.safety.purpose == "creation"
     assert any("MBP" in n for n in c.notes)
     assert c.trigger_bar_end_s is not None and c.trigger_bar_end_s % 30 == 0
 
@@ -166,15 +166,15 @@ def test_outside_rth_is_none_with_explicit_reason():
     _, ce, out = run(trend(+1, t0=PRE_RTH))
     assert out and all(c.direction is Direction.NONE for c, _ in out)
     c = out[-1][0]
-    assert "outside_authorized_entry_hours" in c.blocking_reasons and not c.session_rth
-    assert any(g.name == "authorized_entry_hours" and not g.passed for g in c.gates)
+    assert any(r.startswith("safety:outside_authorized_entry_hours") for r in c.blocking_reasons) and not c.session_rth
+    assert c.safety.session_policy.reason == "outside_authorized_entry_hours" and not c.safety.allowed
 
 
 def test_unknown_calendar_fails_closed():
     _, _, out = run(trend(+1, contract=dict(trading_hours="", liquid_hours="", time_zone_id="US/Central")))
     c = out[-1][0]
     assert c.direction is Direction.NONE
-    assert any(r.startswith("gate:session_calendar") for r in c.blocking_reasons)
+    assert any(r.startswith("safety:session_calendar_invalid") for r in c.blocking_reasons)
 
 
 def test_stale_book_blocks():
@@ -184,8 +184,8 @@ def test_stale_book_blocks():
     sc.tick()
     _, _, out = run(sc)
     c = out[-1][0]
-    assert c.direction is Direction.NONE and any(r.startswith("gate:book_valid") for r in c.blocking_reasons)
-    assert any(r.startswith("gate:market_data_ok") for r in c.blocking_reasons)
+    assert c.direction is Direction.NONE and any(r.startswith("safety:book_not_valid") for r in c.blocking_reasons)
+    assert any(r.startswith("safety:market_data_not_ok") for r in c.blocking_reasons)
 
 
 def test_connection_break_blocks_and_c8_continuity_is_required():
@@ -196,8 +196,8 @@ def test_connection_break_blocks_and_c8_continuity_is_required():
     _, _, out = run(sc)
     c = out[-1][0]
     assert c.direction is Direction.NONE
-    for gate in ("connection", "c8_structure_continuity", "c8_patterns_continuity", "no_active_data_gap"):
-        assert any(r.startswith(f"gate:{gate}") for r in c.blocking_reasons), gate
+    for code in ("connection_unusable", "c8_structure_unavailable", "c8_patterns_unavailable", "active_data_gap"):
+        assert any(r.startswith(f"safety:{code}") for r in c.blocking_reasons), code
 
 
 # ============================================================================ pure evaluation variants
@@ -220,7 +220,7 @@ def test_suspect_book_blocks(long_ctx):
     bad = dataclasses.replace(ctx, quality=dataclasses.replace(ctx.quality, book_state="suspect",
                                                               market_data_ok=False, not_ok_reasons=("book:suspect",)))
     c = evaluate_candidate(bad)
-    assert c.direction is Direction.NONE and any(r.startswith("gate:book_valid") for r in c.blocking_reasons)
+    assert c.direction is Direction.NONE and any(r.startswith("safety:book_not_valid") for r in c.blocking_reasons)
 
 
 def test_missing_rth_vwap_is_none_never_a_fallback(long_ctx):
@@ -263,7 +263,7 @@ def test_c8_unavailable_blocks(long_ctx):
     ctx, _ = long_ctx
     off = dataclasses.replace(ctx.structure_section, available=False, reason="book_stale")
     c = evaluate_candidate(dataclasses.replace(ctx, structure_section=off))
-    assert c.direction is Direction.NONE and any("c8_structure_continuity" in r for r in c.blocking_reasons)
+    assert c.direction is Direction.NONE and any(r.startswith("safety:c8_structure_unavailable") for r in c.blocking_reasons)
 
 
 def _neutral_primaries(ctx):
@@ -408,7 +408,7 @@ def test_decision_layer_does_not_change_market_state_hash(tmp_path):
 # ============================================================================ config / safety
 
 def test_decision_config_validation():
-    for bad in ({"entry_hours": "ALWAYS"}, {"orderflow_components": "ofi,magic"}, {"orderflow_components": ""},
+    for bad in ({"entry_policy": "ALWAYS"}, {"orderflow_components": "ofi,magic"}, {"orderflow_components": ""},
                 {"orderflow_window_s": 7}, {"min_primary_confirmations": 0}, {"min_stop_points": 13.0},
                 {"orderflow_components": "microprice,absorption_compatible"},   # no primary component
                 {"max_evaluation_lag_ms": -1},
@@ -417,7 +417,7 @@ def test_decision_config_validation():
             config_from_mapping({"decision": bad})
     d = config_from_mapping({}).decision
     assert (d.regime_bars_5m, d.setup_bars_1m, d.stop_buffer_ticks, d.min_stop_points, d.max_stop_points,
-            d.entry_hours) == (2, 3, 2, 10.0, 12.0, "RTH_ONLY")
+            d.entry_policy) == (2, 3, 2, 10.0, 12.0, "RTH_ONLY")
     assert (d.min_primary_confirmations, d.max_evaluation_lag_ms, d.recent_window_bars_1m) == (1, 2000, 3)
 
 

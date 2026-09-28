@@ -162,7 +162,9 @@ class DecisionConfig:
     regime_bars_5m: int = 2                # completed 5 m bars defining the regime
     setup_bars_1m: int = 3                 # completed 1 m bars defining the setup
     recent_window_bars_1m: int = 3         # completed 1 m bars whose rolling extreme is the structure (not a pivot)
-    entry_hours: str = "RTH_ONLY"
+    entry_policy: str = "RTH_ONLY"        # RTH from IBKR liquidHours (SessionTracker)
+    opening_buffer_seconds: int = 0        # authorized window = [RTH start + opening, RTH end - closing)
+    closing_buffer_seconds: int = 0        # defaults ZERO: no invented buffer until calibrated
     orderflow_components: str = "ofi,trade_flow,microprice,sweep_follow,absorption_compatible"
     orderflow_window_s: int = 5            # C7/C8 rolling window used for confirmation (1, 5 or 30)
     min_primary_confirmations: int = 1     # PRIMARY order-flow votes required (ofi/trade_flow/sweep_follow);
@@ -231,9 +233,16 @@ def _check_type(section: str, key: str, value: Any, expected: type) -> Any:
     raise ConfigError(f"{where}: unsupported config type {expected!r}")  # pragma: no cover
 
 
+# Renamed keys: an obsolete key is an explicit error naming its replacement (never silently ignored).
+_RENAMED_KEYS: dict[tuple[str, str], str] = {("decision", "entry_hours"): "entry_policy"}
+
+
 def _build_section(name: str, cls: type, raw: Mapping[str, Any]) -> Any:
     if not isinstance(raw, Mapping):
         raise ConfigError(f"[{name}] must be a table")
+    for key in sorted(raw):
+        if (name, key) in _RENAMED_KEYS:
+            raise ConfigError(f"[{name}].{key} is obsolete: renamed to {_RENAMED_KEYS[(name, key)]!r}")
     fields = {f.name: f for f in dataclasses.fields(cls)}
     unknown = sorted(set(raw) - set(fields))
     if unknown:
@@ -331,8 +340,11 @@ def _validate(cfg: HermesConfig) -> None:
     if d.mode not in DECISION_MODES:
         raise ConfigError(f"[decision].mode must be one of {DECISION_MODES} in Phase C9 "
                           "(no autonomous execution path exists)")
-    if d.entry_hours not in ENTRY_HOUR_POLICIES:
-        raise ConfigError(f"[decision].entry_hours must be one of {ENTRY_HOUR_POLICIES}")
+    if d.entry_policy not in ENTRY_HOUR_POLICIES:
+        raise ConfigError(f"[decision].entry_policy must be one of {ENTRY_HOUR_POLICIES}")
+    if d.opening_buffer_seconds < 0 or d.closing_buffer_seconds < 0 or \
+            d.opening_buffer_seconds + d.closing_buffer_seconds >= 12 * 3600:
+        raise ConfigError("[decision] opening/closing buffers must be >= 0 and leave a non-empty window")
     comps = [c.strip() for c in d.orderflow_components.split(",") if c.strip()]
     if not comps or any(c not in ORDERFLOW_COMPONENTS for c in comps) or len(set(comps)) != len(comps):
         raise ConfigError(f"[decision].orderflow_components must be a non-empty subset of {ORDERFLOW_COMPONENTS}")

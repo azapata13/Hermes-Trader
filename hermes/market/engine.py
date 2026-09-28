@@ -792,7 +792,8 @@ class MarketEngine:
                 patterns=patterns,
                 absorption=absorption,
                 units_per_point=_units_per_point(inst.grid),
-                tick_units=inst.grid.step_at(0) if inst.grid is not None and inst.grid.is_uniform else None))
+                tick_units=inst.grid.step_at(0) if inst.grid is not None and inst.grid.is_uniform else None,
+                required_streams=inst.required))
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,

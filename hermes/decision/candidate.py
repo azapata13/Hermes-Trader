@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from hermes.config import PRIMARY_ORDERFLOW, DecisionConfig
+from hermes.decision.safety import PURPOSE_CREATION, SafetyPolicy, SafetyResult, facts_from_context
 from hermes.decision.context import EPISTEMIC_NOTES, BarContext, DecisionContext, build_decision_context
 from hermes.market.bars import Bar, BarFlag
 from hermes.market.snapshot import MarketSnapshot
@@ -140,7 +141,7 @@ class SetupCandidate:
     supporting_reasons: tuple[str, ...]
     caution_reasons: tuple[str, ...]
     blocking_reasons: tuple[str, ...]
-    gates: tuple[Condition, ...]       # market-data / session / continuity gates (fail closed)
+    safety: SafetyResult               # the single SafetyPolicy at creation (hard blocks / holds / session)
     continuity: tuple[tuple[str, int | None], ...]
     stream_generations: tuple[tuple[str, int | None], ...]
     session_rth: bool
@@ -192,34 +193,11 @@ def _points_to_units(points: float, upp: int) -> int | None:
     return r if abs(u - r) < 1e-9 else None
 
 
-# ---------------------------------------------------------------------------- gates
+# ---------------------------------------------------------------------------- safety
 
-def gates(ctx: DecisionContext, cfg: DecisionConfig) -> tuple[Condition, ...]:
-    q, p, s = ctx.quality, ctx.price, ctx.session
-    out = [
-        _cond("connection", q.connection == "connected", q.connection),
-        _cond("contract_defined", q.contract_state == "defined", q.contract_state),
-        _cond("live_market_data", q.market_data_type == 1 and not q.not_live,
-              f"market_data_type={q.market_data_type} not_live={q.not_live}"),
-        _cond("no_session_conflict", q.conflict_phase == "none", q.conflict_phase),
-        _cond("no_critical_alert", not q.alerts, ",".join(q.alerts) or "none"),
-        _cond("market_data_ok", q.market_data_ok, ",".join(q.not_ok_reasons) or "ok"),
-        _cond("book_valid", q.book_state == "valid", str(q.book_state)),
-        _cond("no_active_data_gap", q.bar_active_flags == 0,
-              BarFlag(q.bar_active_flags).name if q.bar_active_flags else "none"),
-        _cond("classification_context", q.classification_context_ok, q.classification_context_reason),
-        _cond("price_available", p.available and p.best_bid is not None and p.best_ask is not None, p.reason),
-        _cond("price_grid_uniform", p.units_per_point is not None and p.tick_units is not None,
-              f"units_per_point={p.units_per_point} tick_units={p.tick_units}"),
-        _cond("session_calendar", q.session_calendar_ok and s.available, s.reason),
-        _cond("c8_structure_continuity", ctx.structure_section.available, ctx.structure_section.reason),
-        _cond("c8_patterns_continuity", ctx.patterns_section.available, ctx.patterns_section.reason),
-        _cond("c7_metrics_available", ctx.flow.available, ctx.flow.reason),
-    ]
-    if cfg.entry_hours == "RTH_ONLY":
-        out.append(_cond("authorized_entry_hours", s.available and s.in_rth,
-                         "in_rth" if s.in_rth else "outside_authorized_entry_hours"))
-    return tuple(out)
+def creation_safety(ctx: DecisionContext, cfg: DecisionConfig) -> SafetyResult:
+    """The single SafetyPolicy, applied to the evidence at this decision point (fail closed)."""
+    return SafetyPolicy(cfg).evaluate(facts_from_context(ctx), purpose=PURPOSE_CREATION)
 
 
 # ---------------------------------------------------------------------------- stages
@@ -408,7 +386,7 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
     """Pure: one candidate (LONG | SHORT | NONE) from one DecisionContext. The trigger bar is the
     latest COMPLETED 30 s bar of the context; the evaluation time is the context's event time."""
     cfg = cfg or DecisionConfig()
-    g = gates(ctx, cfg)
+    safety = creation_safety(ctx, cfg)
     regime = assess_regime(ctx, cfg)
     setup = assess_setup(ctx, cfg, regime.result)
     trigger = assess_trigger(ctx, cfg, setup.result)
@@ -416,8 +394,8 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
 
     supporting: list[str] = []
     caution: list[str] = []
-    blocking: list[str] = [f"gate:{c.name}:{c.detail}" if c.name != "authorized_entry_hours"
-                           else "outside_authorized_entry_hours" for c in g if not c.passed]
+    blocking: list[str] = [f"safety:{r.code}:{r.detail}" for r in safety.hard_block_reasons]
+    blocking += [f"hold:{r.code}:{r.detail}" for r in safety.temporary_hold_reasons]
 
     # evaluation lag (event time, deterministic in replay): never hidden, fail closed when stale
     tbar = ctx.bars_30s.latest
@@ -503,7 +481,7 @@ def evaluate_candidate(ctx: DecisionContext, cfg: DecisionConfig | None = None) 
         risk=risk,
         supporting_reasons=tuple(supporting), caution_reasons=tuple(caution),
         blocking_reasons=tuple(dict.fromkeys(blocking)),
-        gates=g,
+        safety=safety,
         continuity=(("tape_epoch", q.tape_epoch), ("classifier_epoch", q.classifier_epoch),
                     ("metrics_epoch", q.metrics_epoch), ("structure_epoch", q.structure_epoch),
                     ("pattern_epoch", q.pattern_epoch), ("book_epoch", q.book_epoch)),
@@ -568,7 +546,8 @@ class CandidateEngine:
             s.none += 1
         for r in c.blocking_reasons:
             parts = r.split(":")
-            key = ":".join(parts[:2]) if parts[0] in ("gate", "risk", "regime_5m", "setup_1m", "trigger_30s") else parts[0]
+            key = ":".join(parts[:2]) if parts[0] in ("safety", "hold", "risk", "regime_5m", "setup_1m",
+                                                     "trigger_30s") else parts[0]
             s.blocking_counts[key] = s.blocking_counts.get(key, 0) + 1
         self.history.append(c)
         from hermes.replay.fingerprint import digest

@@ -12,11 +12,13 @@ explicit status:
 
 Lifecycle status is separate from ``approval_allowed_now``: an ACTIONABLE candidate is
 temporarily NOT approvable while the book, though still authoritatively VALID and continuity-
-safe, is momentarily non-priceable (crossed / unsorted / empty side during row-by-row depth
-updates). Such a snapshot is never used as a price observation — no entry drift and no book-based
+safe, is momentarily non-priceable (crossed / unsorted during row-by-row depth updates; an emptied
+side also invalidates the C7/C8 evidence and is therefore BLOCKED by the SafetyPolicy). Such a snapshot is never used as a price observation — no entry drift and no book-based
 structural invalidation are judged from it, and no bid/ask is synthesised from it. When a coherent
 VALID book returns, evaluation resumes; this is not a revival (the status never left ACTIONABLE).
-Final statuses always have ``approval_allowed_now = False``.
+Final statuses always have ``approval_allowed_now = False``. This field is only the LIFECYCLE
+part; the approval payload additionally requires a fresh approval-time SafetyResult
+(``hermes.decision.approval.approval_eligibility``).
 
 Only ACTIONABLE records ever change status, and only to a terminal status. Nothing is revived, the
 entry is never moved, the invalidation level is never moved and risk is never widened; a later
@@ -36,12 +38,18 @@ from enum import Enum
 
 from hermes.config import DecisionConfig
 from hermes.decision.candidate import Direction, SetupCandidate
-from hermes.market.events import BookSide, ConnectionState, Stream
+from hermes.decision.safety import (
+    PURPOSE_LIFECYCLE,
+    SafetyPolicy,
+    StatusReason,
+    book_coherence,
+    facts_from_engine,
+)
 from hermes.market.orderbook import BookState
 
 LIFECYCLE_SCHEMA_VERSION = 1
 _S = 1_000_000_000
-_REASON_PREFIXES = ("gate", "risk", "regime_5m", "setup_1m", "trigger_30s")
+_REASON_PREFIXES = ("safety", "hold", "risk", "regime_5m", "setup_1m", "trigger_30s")
 
 
 class CandidateStatus(str, Enum):
@@ -57,12 +65,6 @@ TERMINAL = frozenset({CandidateStatus.NONE, CandidateStatus.BLOCKED, CandidateSt
                       CandidateStatus.STALE, CandidateStatus.INVALIDATED})
 _SEVERITY = {CandidateStatus.BLOCKED: 4, CandidateStatus.INVALIDATED: 3, CandidateStatus.STALE: 2,
              CandidateStatus.EXPIRED: 1}
-
-
-@dataclass(frozen=True, slots=True)
-class StatusReason:
-    code: str                          # machine-readable, e.g. "safety:book_not_valid", "entry_drift"
-    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,87 +124,22 @@ def initial_record(c: SetupCandidate, cfg: DecisionConfig) -> CandidateRecord:
         status, reasons = CandidateStatus.ACTIONABLE, (StatusReason("actionable_proposal", "HUMAN_APPROVAL only"),)
     else:
         reasons = tuple(_reason(r) for r in c.blocking_reasons)
-        safety = any(r.code.startswith("gate:") or r.code in ("outside_authorized_entry_hours",
-                                                                "trigger_evaluation_stale",
-                                                                "no_completed_30s_trigger_bar")
-                     for r in reasons)
-        status = CandidateStatus.BLOCKED if safety else CandidateStatus.NONE
+        sr = c.safety
+        # Hard safety failures (other than the authorization window) => BLOCKED. Outside the
+        # authorized window or a transient non-priceable book at creation => NONE (no candidate here).
+        hard_non_window = bool(sr.hard_block_reasons) and not sr.only_window_blocks
+        stale = any(r.code in ("trigger_evaluation_stale", "no_completed_30s_trigger_bar") for r in reasons)
+        status = CandidateStatus.BLOCKED if hard_non_window or stale else CandidateStatus.NONE
     exp = None if c.trigger_bar_end_s is None else (c.trigger_bar_end_s + cfg.candidate_ttl_seconds) * _S
     return CandidateRecord(LIFECYCLE_SCHEMA_VERSION, setup_id(c), c, status, reasons, c.seq, c.wall_ns, exp,
                            c.seq, c.wall_ns, approval_allowed_now=status is CandidateStatus.ACTIONABLE)
 
 
-def book_coherence(book) -> tuple[bool, str]:
-    """Is the current depth snapshot usable as an executable price observation?
-
-    Independent of the authoritative book state (VALID/SUSPECT/STALE is judged by the OrderBook):
-    a VALID book can be momentarily crossed or unsorted between row updates."""
-    if book is None:
-        return False, "no_book"
-    bids = book.levels(BookSide.BID)
-    asks = book.levels(BookSide.ASK)
-    if not bids or not asks:
-        return False, "empty_side_transition"
-    if bids[0][0] >= asks[0][0]:
-        return False, "crossed_book_transition"
-    if any(bids[i][0] <= bids[i + 1][0] for i in range(len(bids) - 1)) or \
-            any(asks[i][0] >= asks[i + 1][0] for i in range(len(asks) - 1)):
-        return False, "unsorted_book_transition"
-    return True, "ok"
-
-
 # ---------------------------------------------------------------------------- checks (read-only)
-
-_EPOCH_READERS = {
-    "tape_epoch": lambda i: i.tape.epoch if i.tape is not None else None,
-    "classifier_epoch": lambda i: i.classifier.epoch if i.classifier is not None else None,
-    "metrics_epoch": lambda i: i.metrics.continuity_epoch,
-    "structure_epoch": lambda i: i.structure.continuity_epoch,
-    "pattern_epoch": lambda i: i.patterns.continuity_epoch,
-    "book_epoch": lambda i: i.book.epoch if i.book is not None else None,
-}
-
-
-def safety_violations(engine, inst, c: SetupCandidate, cfg: DecisionConfig) -> list[StatusReason]:
-    """Hard safety conditions re-checked against the live engine state. Any => BLOCKED."""
-    out: list[StatusReason] = []
-    if engine.connection is not ConnectionState.CONNECTED:
-        out.append(StatusReason("safety:connection", engine.connection.value))
-    if engine.not_live:
-        out.append(StatusReason("safety:market_data_not_live", "delayed/frozen data"))
-    if engine.conflict.active:
-        out.append(StatusReason("safety:session_conflict_10197", engine.conflict.phase.value))
-    if engine.farm_broken:
-        out.append(StatusReason("safety:farm_broken", ""))
-    if engine.alerts:
-        out.append(StatusReason("safety:critical_alert", ",".join(sorted(engine.alerts))))
-    if inst.book is None or inst.book.state is not BookState.VALID:
-        out.append(StatusReason("safety:book_not_valid", inst.book.state.value if inst.book else "none"))
-    for name, gen in c.stream_generations:
-        st = inst.streams.get(Stream(name))
-        if st is None or st.generation != gen or st.error_active:
-            out.append(StatusReason("safety:stream_changed", f"{name}: {gen} -> {st.generation if st else None}"))
-    for name, before in c.continuity:
-        now = _EPOCH_READERS[name](inst)
-        if now != before:
-            out.append(StatusReason("safety:continuity_epoch_changed", f"{name}: {before} -> {now}"))
-    if inst.bars is not None and inst.bars.cond_flags:
-        out.append(StatusReason("safety:active_data_gap", str(inst.bars.cond_flags)))
-    if cfg.entry_hours == "RTH_ONLY" and not (inst.sessions is not None and inst.sessions.in_rth):
-        out.append(StatusReason("safety:left_rth", "outside_authorized_entry_hours"))
-    if inst.grid is None or not inst.grid.is_uniform:
-        out.append(StatusReason("safety:price_grid_invalid", ""))
-    ok, why = engine.classification_context(inst)
-    if not ok:
-        out.append(StatusReason("safety:classification_invalid", why))
-    reasons = engine.market_data_reasons(inst)
-    if reasons:
-        out.append(StatusReason("safety:market_data_not_ok", ",".join(reasons[:4])))
-    return out
-
 
 def price_checks(inst, c: SetupCandidate, cfg: DecisionConfig
                  ) -> tuple[list[StatusReason], list[StatusReason], list[StatusReason]]:
+    # NOTE: coherence itself is defined once in hermes.decision.safety (book_coherence)
     """(structural invalidation, entry drift, temporary holds) at this observation.
 
     Book-based checks use a COHERENT VALID book only; a momentarily non-priceable snapshot yields a
@@ -259,6 +196,7 @@ class LifecycleTracker:
         self.transitions: deque[Transition] = deque(maxlen=history or self.cfg.candidate_history)
         self.counts: dict[str, int] = {}
         self._chain = "0" * 64
+        self._policy = SafetyPolicy(self.cfg)
 
     # ---- mutation (driver only)
     def register(self, c: SetupCandidate) -> CandidateRecord:
@@ -284,12 +222,14 @@ class LifecycleTracker:
             outcome: tuple[CandidateStatus, list[StatusReason]] | None = None
             hold: list[StatusReason] = []
             if inst is None:
-                outcome = (CandidateStatus.BLOCKED, [StatusReason("safety:instrument_missing", "")])
+                outcome = (CandidateStatus.BLOCKED, [StatusReason("instrument_missing", "")])
             else:
-                safety = safety_violations(engine, inst, c, self.cfg)
-                inval, drift, hold = price_checks(inst, c, self.cfg)
-                if safety:
-                    outcome = (CandidateStatus.BLOCKED, safety)
+                sr = self._policy.evaluate(facts_from_engine(engine, inst, wall_ns), purpose=PURPOSE_LIFECYCLE,
+                                           baseline=c)
+                inval, drift, _ = price_checks(inst, c, self.cfg)
+                hold = list(sr.temporary_hold_reasons)
+                if sr.hard_block_reasons:
+                    outcome = (CandidateStatus.BLOCKED, list(sr.hard_block_reasons))
                 elif inval:
                     outcome = (CandidateStatus.INVALIDATED, inval)
                 elif drift:

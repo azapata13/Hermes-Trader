@@ -331,8 +331,8 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   invalidation = last `recent_window_bars_1m`=3 completed 1 m bars: recent_1m_window_low/_high (rolling-window extreme, NOT a formal pivot) ∓ 2 ticks; required stop =
   max(10 pt, structural distance); > 12 pt ⇒ NONE (never a capped stop inside structure); no TP, no partials.
   Fail-closed gates (connection, contract, LIVE data, 10197, alerts, market_data_ok, VALID book, no active
-  data gap, classification context, uniform grid, session calendar, C7/C8 continuity, RTH_ONLY entry hours
-  from liquidHours). Candidates carry supporting / caution / blocking reasons, per-stage conditions,
+  data gap, classification context, uniform grid, session calendar, C7/C8 continuity, RTH_ONLY entry policy
+  from liquidHours; consolidated into SafetyPolicy in C9d). Candidates carry supporting / caution / blocking reasons, per-stage conditions,
   order-flow evidence, continuity epochs and MBP notes. `CandidateEngine`/`CandidateDriver` live OUTSIDE
   MarketEngine, evaluate once per event on which a 30 s bar completed, keep a bounded history and a rolling
   decision fingerprint; the market HASH_VERSION is unchanged and decisions never mutate market state
@@ -362,6 +362,45 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   future HUMAN_APPROVAL workflow (entry, stop, risk, invalidation + source, created/expiry, evaluation lag,
   5 m/1 m/30 s summaries, order-flow evidence, reasons, session/continuity, MBP notes, status); building it
   sends nothing. Lifecycle state has its own rolling fingerprint; the market hash is unchanged (tested).
+
+- **C9d SafetyPolicy** (`hermes/decision/safety.py`): ONE deterministic policy replaces the separate
+  creation gates and lifecycle safety checks. `SafetyPolicy(cfg).evaluate(facts, purpose=creation|lifecycle|approval,
+  baseline=candidate?, record=record?)` → `SafetyResult(allowed, hard_block_reasons[], temporary_hold_reasons[],
+  session_policy, continuity (name, baseline, now), market_data)`. The inputs (`SafetyFacts`) are read
+  either from a `DecisionContext` (creation) or directly from the live engine (lifecycle / approval); an
+  anti-drift test asserts both readers judge the same state identically. The signature accepts no override
+  input: no LLM, memory, shadow or learned rule can remove a restriction. Stable reason codes
+  (`HARD_CODES`): connection_unusable, contract_not_defined, market_data_not_live, session_conflict_10197,
+  critical_alert, farm_broken, required_stream_inactive (a subscribed-but-quiet trades stream is legitimate),
+  stream_generation_changed, book_not_valid, active_data_gap, continuity_epoch_changed,
+  classification_context_invalid, price_grid_not_uniform, session_calendar_invalid,
+  outside_authorized_entry_hours, within_opening_buffer, within_closing_buffer, market_data_not_ok,
+  c7_metrics_unavailable / c8_structure_unavailable / c8_patterns_unavailable (judged at EVERY purpose —
+  current evidence availability is independent of continuity epochs: e.g. an emptied bid side
+  invalidates C7 book metrics without bumping the C7 epoch), candidate_expired,
+  candidate_status_not_actionable (approval purpose).
+  `HOLD_CODES` (only for an authoritatively VALID book whose current depth snapshot is transiently
+  non-priceable): crossed_book_transition, unsorted_book_transition, empty_side_transition (in practice an
+  emptied side also makes C7/C8 evidence unavailable, so it ends BLOCKED). Book coherence is
+  defined once (`rows_coherence`) and shared by context, lifecycle and policy. Session policy:
+  `[decision].entry_policy = "RTH_ONLY"` (renamed from `entry_hours`) from IBKR liquidHours, with
+  `opening_buffer_seconds` / `closing_buffer_seconds` (default 0) → authorized window
+  [RTH start + opening, RTH end − closing). Outside the window at creation ⇒ NONE (no candidate); an
+  ACTIONABLE candidate whose window closes before approval ⇒ BLOCKED. Any other hard block at creation ⇒
+  BLOCKED; a hold at creation ⇒ NONE. `approval_check(engine, record)` re-runs the policy at approval time
+  and additionally requires status ACTIONABLE and TTL not reached. The approval payload is fail-closed:
+  `approval_allowed_now` = lifecycle allows (ACTIONABLE, no hold) AND a real `SafetyResult` was supplied
+  that was evaluated for approval, for this `setup_id` (`subject`), on an event-state not older than the
+  record's last observation (`evaluated_wall_ns`), and passed. Without it: False with
+  `safety_not_evaluated`; other denials `safety_result_not_for_approval`, `safety_result_other_candidate`,
+  `safety_result_outdated`, `lifecycle_hold_active`, `candidate_status_not_actionable`, plus the bare
+  failing SafetyPolicy codes (`approval_denied_reasons`). Final statuses are never eligible. Preferred
+  path: `current_approval_payload(engine, record)`. The obsolete `[decision].entry_hours` key is an
+  explicit config error naming `entry_policy`. Trading-performance limits
+  (e.g. max ~5 trades/day) are deliberately NOT part of SafetyPolicy; they belong to a later, additive
+  RiskEligibilityPolicy. Record reasons created at evaluation
+  keep their stage prefix (`safety:`, `hold:`, `risk:`, `regime_5m:` …); lifecycle transitions use the bare
+  SafetyPolicy codes.
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 

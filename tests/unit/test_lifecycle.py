@@ -11,6 +11,7 @@ from hermes.decision.approval import approval_payload
 from hermes.decision.candidate import CandidateEngine, Direction
 from hermes.decision.driver import CandidateDriver
 from hermes.decision.lifecycle import CandidateStatus, LifecycleTracker, TERMINAL, setup_id
+from hermes.market.events import BookSide
 from tests.support import DEPTH, TICK, TRADES, Harness, write_hrec
 from tests.unit.test_candidate import PRE_RTH, S, T0, shift_book, trend
 
@@ -82,8 +83,9 @@ def test_initial_statuses_none_blocked_actionable():
     assert early and all(r.status is CandidateStatus.NONE for r in early)  # no setup: NONE, not BLOCKED
     assert all(r.reasons for r in early) and all(":" in r.reasons[0].code or r.reasons[0].code for r in early)
     pre = Live(trend(+1, t0=PRE_RTH, minutes=10))
-    assert pre.lc.records and all(r.status is CandidateStatus.BLOCKED for r in pre.lc.records)
-    assert any(x.code == "outside_authorized_entry_hours" for x in pre.lc.records[-1].reasons)
+    # outside the authorized window at CREATION: NONE (no candidate here), not BLOCKED
+    assert pre.lc.records and all(r.status is CandidateStatus.NONE for r in pre.lc.records)
+    assert any(x.code == "safety:outside_authorized_entry_hours" for x in pre.lc.records[-1].reasons)
 
 
 # ============================================================================ expiry
@@ -245,7 +247,7 @@ def test_suspect_book_is_a_final_block_not_a_hold():
     lv.tick_until(606)                                                     # ... beyond grace -> SUSPECT
     r = lv.lc.get(rec.setup_id)
     assert r.status is CandidateStatus.BLOCKED and not r.approval_allowed_now
-    assert any(x.code == "safety:book_not_valid" for x in r.reasons)
+    assert any(x.code == "book_not_valid" for x in r.reasons)
     lv.sc.depth(DEPTH, 0, 1, 1, price(entry - 1), 10)                      # book recovers: no revival
     lv.tick_until(608)
     assert lv.lc.get(rec.setup_id).status is CandidateStatus.BLOCKED
@@ -261,7 +263,7 @@ def test_connection_loss_blocks_actionable_candidate():
     r = lv.lc.get(rec.setup_id)
     assert r.status is CandidateStatus.BLOCKED
     codes = {x.code for x in r.reasons}
-    assert "safety:connection" in codes and "safety:book_not_valid" in codes
+    assert "connection_unusable" in codes and "book_not_valid" in codes
 
 
 def test_depth_reset_changes_continuity_and_blocks():
@@ -271,7 +273,7 @@ def test_depth_reset_changes_continuity_and_blocks():
     lv.pump()
     r = lv.lc.get(rec.setup_id)
     assert r.status is CandidateStatus.BLOCKED
-    assert any(x.code == "safety:continuity_epoch_changed" and "book_epoch" in x.detail for x in r.reasons)
+    assert any(x.code == "continuity_epoch_changed" and "book_epoch" in x.detail for x in r.reasons)
 
 
 def test_trades_resubscription_changes_generation_and_blocks():
@@ -280,7 +282,7 @@ def test_trades_resubscription_changes_generation_and_blocks():
     lv.sc.request("reqTickByTickData", 30_003, tick_type="AllLast")
     lv.pump()
     r = lv.lc.get(rec.setup_id)
-    assert r.status is CandidateStatus.BLOCKED and any(x.code == "safety:stream_changed" for x in r.reasons)
+    assert r.status is CandidateStatus.BLOCKED and any(x.code == "stream_generation_changed" for x in r.reasons)
 
 
 def test_leaving_rth_blocks():
@@ -288,7 +290,55 @@ def test_leaving_rth_blocks():
     lv.h.engine.instruments[1].sessions.in_rth = False                    # as at the RTH close boundary
     t = lv.lc.update(lv.h.engine, 10**9, (T0 + 605) * S)
     assert t and t[0].to_status is CandidateStatus.BLOCKED
-    assert any(x.code == "safety:left_rth" for x in lv.lc.get(rec.setup_id).reasons)
+    assert any(x.code == "outside_authorized_entry_hours" for x in lv.lc.get(rec.setup_id).reasons)
+
+
+_UNAVAILABLE = {
+    "c7_metrics_unavailable": lambda inst: (setattr(inst.metrics, "_book_valid", False),
+                                            setattr(inst.metrics, "_book_reason", "injected")),
+    "c8_structure_unavailable": lambda inst: (setattr(inst.structure, "_available", False),
+                                              setattr(inst.structure, "_reason", "injected")),
+    "c8_patterns_unavailable": lambda inst: (setattr(inst.patterns, "_available", False),
+                                             setattr(inst.patterns, "_reason", "injected")),
+}
+
+
+@pytest.mark.parametrize("code", sorted(_UNAVAILABLE))
+def test_c7_c8_evidence_loss_without_epoch_change_blocks(code):
+    """Regression (C9d review): ACTIONABLE -> required C7/C8 evidence becomes unavailable while every
+    continuity epoch and stream generation stays identical -> BLOCKED, never approval-eligible."""
+    from hermes.decision.approval import approval_payload
+    from hermes.decision.safety import approval_check, facts_from_engine
+    lv, rec = started()
+    eng, inst = lv.h.engine, lv.h.engine.instruments[1]
+    before = facts_from_engine(eng, inst, (T0 + 605) * S)
+    _UNAVAILABLE[code](inst)                                              # availability lost, NO epoch bump
+    after = facts_from_engine(eng, inst, (T0 + 605) * S)
+    assert after.continuity == before.continuity and after.streams == before.streams
+    safety = approval_check(eng, lv.lc.get(rec.setup_id), now_wall_ns=(T0 + 605) * S)
+    assert code in safety.hard_codes and not safety.allowed               # approval-time check sees it too
+    assert not approval_payload(lv.lc.get(rec.setup_id), safety).approval_allowed_now
+    t = lv.lc.update(eng, 10**9, (T0 + 605) * S)
+    r = lv.lc.get(rec.setup_id)
+    assert t and t[0].to_status is CandidateStatus.BLOCKED and r.status is CandidateStatus.BLOCKED
+    assert [x.code for x in r.reasons] == [code]                          # not an epoch-change reason
+    assert not r.approval_allowed_now and not approval_payload(r).approval_allowed_now
+
+
+def test_c7_metrics_loss_on_real_book_path_blocks_even_though_metrics_epoch_is_unchanged():
+    """Real engine path: a VALID book with an emptied bid side invalidates C7 book metrics WITHOUT
+    bumping the C7 metrics epoch; the current-availability rule catches it on its own."""
+    lv, rec = started()
+    inst = lv.h.engine.instruments[1]
+    m_epoch = inst.metrics.continuity_epoch
+    lv.at(605)
+    for _ in range(len(inst.book.levels(BookSide.BID))):
+        lv.sc.depth(DEPTH, 0, 2, 1, 0.0, 0)                               # delete bid rows (row 0 each time)
+    lv.pump()
+    r = lv.lc.get(rec.setup_id)
+    assert inst.metrics.continuity_epoch == m_epoch and not inst.metrics.token()[1]
+    assert r.status is CandidateStatus.BLOCKED and not r.approval_allowed_now
+    assert "c7_metrics_unavailable" in {x.code for x in r.reasons}
 
 
 def test_safety_dominates_everything_and_annotations_never_reactivate():

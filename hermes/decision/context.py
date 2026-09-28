@@ -32,7 +32,7 @@ from hermes.market.sessions import SessionSnapshot
 from hermes.market.snapshot import InstrumentSnapshot, MarketSnapshot
 from hermes.market.structure import StructureSnapshot
 
-CONTEXT_SCHEMA_VERSION = 3
+CONTEXT_SCHEMA_VERSION = 4
 
 EPISTEMIC_NOTES = (
     "IBKR CME depth is aggregated market-by-price (MBP), not market-by-order (MBO)",
@@ -73,6 +73,9 @@ class DataQuality:
     pattern_epoch: int | None
     bar_active_flags: int                                # BarFlag of the quality condition active NOW
     session_calendar_ok: bool
+    required_streams: tuple[str, ...] = ()
+    book_coherent: bool = False                          # snapshot usable as a price observation
+    book_coherence_reason: str = "no_book"
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +207,9 @@ class DecisionContext:
 # ---------------------------------------------------------------------------- builders
 
 def _quality(snap: MarketSnapshot, i: InstrumentSnapshot) -> DataQuality:
+    from hermes.decision.safety import EMPTY_SIDE_TRANSITION, rows_coherence
     b, t = i.book, i.tape
+    coh = rows_coherence(b.bids, b.asks) if b is not None else (False, EMPTY_SIDE_TRANSITION)
     return DataQuality(
         connection=snap.connection.value, farm_broken=snap.farm_broken, not_live=snap.not_live,
         conflict_phase=snap.conflict_phase, alerts=tuple(snap.alerts), contract_state=i.contract_state,
@@ -220,6 +225,8 @@ def _quality(snap: MarketSnapshot, i: InstrumentSnapshot) -> DataQuality:
         pattern_epoch=i.patterns.continuity_epoch if i.patterns else None,
         bar_active_flags=int(i.bars.active_flags) if i.bars else 0,
         session_calendar_ok=bool(i.session and i.session.calendar_ok),
+        required_streams=tuple(x.value for x in i.required_streams),
+        book_coherent=coh[0], book_coherence_reason=coh[1],
     )
 
 
