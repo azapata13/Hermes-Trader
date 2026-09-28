@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7+ not started.
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C8 follow-through deadline fix applied on the C9 branch.
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -289,6 +289,16 @@ window is labelled with the older side at reduced confidence.
   config snapshot by default (`--config current|path` to override).
 - Performance (cloud container, 100 k raw, depth-heavy): ≈ 41 k raw/s with checkpoints (decode ≈ 210 k/s,
   decode+normalize ≈ 95 k/s, shared engine ≈ 100 k events/s dominates; hash ≈ 0.3 ms/checkpoint).
+
+## 8d. C8 audit fix (applied on the C9 branch)
+
+`PatternEngine` follow-through: a pending check whose deadline passed before a book event used to be
+resolved with THAT event's new midpoint, i.e. with information from after the horizon (look-ahead).
+Now deadlines that passed strictly before a book event are resolved with the midpoint that prevailed
+until then, before the event's midpoint is applied; a deadline exactly at the event sees the event.
+Regression tests: `test_follow_through_never_uses_a_midpoint_from_after_the_horizon`,
+`test_deadline_exactly_at_book_event_sees_that_event` (three C8 tests that encoded the look-ahead were
+corrected). HASH_VERSION unchanged (summary structure unchanged); the code fingerprint changes.
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 

@@ -82,7 +82,8 @@ def test_gap_finalizes_previous_sweep():
 def test_buy_follow_through_after_horizon():
     e = ready(follow_horizon_ms=100)
     e.on_trade(trade(10_000_000, Aggressor.BUY, 101, 4), book())
-    e.observe_book(book(101, 102), 120_000_000)
+    e.observe_book(book(101, 102), 60_000_000)      # mid moves up INSIDE the horizon
+    e.advance(120_000_000)
     f = e.snapshot().latest_follow[0]
     assert f.result is FollowResult.FOLLOW_THROUGH and f.favorable_mid_x2 == 2
 
@@ -98,7 +99,8 @@ def test_buy_no_follow_when_mid_flat():
 def test_sell_no_follow_when_mid_moves_up():
     e = ready(follow_horizon_ms=100)
     e.on_trade(trade(10_000_000, Aggressor.SELL, 100, 3), book())
-    e.observe_book(book(101, 102), 120_000_000)
+    e.observe_book(book(101, 102), 60_000_000)
+    e.advance(120_000_000)
     f = e.snapshot().latest_follow[0]
     assert f.result is FollowResult.NO_FOLLOW_THROUGH and f.favorable_mid_x2 == -2
 
@@ -126,5 +128,24 @@ def test_windows_evict_old_events():
     e.observe_book(book(101, 102), 20_000_000)
     e.advance(1_100_000_000)
     w1, w5 = e.snapshot().windows[0], e.snapshot().windows[1]
-    assert w1.buy_sweeps == 0 and w1.follow_events == 0
-    assert w5.buy_sweeps == 1 and w5.follow_events == 2
+    assert w1.buy_sweeps == 0 and w1.follow_events == 0 and w1.no_follow_events == 0
+    # deadlines (11/12 ms) passed before the 20 ms mid change: judged on the prevailing flat mid
+    assert w5.buy_sweeps == 1 and w5.no_follow_events == 2 and w5.follow_events == 0
+
+
+def test_follow_through_never_uses_a_midpoint_from_after_the_horizon():
+    """Regression (C8 audit): a book event arriving after the deadline used to resolve the
+    pending check with its NEW midpoint, i.e. with information from beyond the horizon."""
+    e = ready(follow_horizon_ms=500)
+    e.on_trade(trade(10_000_000, Aggressor.BUY, 101, 1), book())       # deadline 510 ms, mid 201
+    e.observe_book(book(104, 105), 2_000_000_000)                       # first event after it
+    f = e.snapshot().latest_follow[0]
+    assert f.result is FollowResult.NO_FOLLOW_THROUGH and f.end_mid_x2 == 201
+    assert e.snapshot().windows[2].buy_no_follow_volume == 1
+
+
+def test_deadline_exactly_at_book_event_sees_that_event():
+    e = ready(follow_horizon_ms=100)
+    e.on_trade(trade(10_000_000, Aggressor.BUY, 101, 1), book())       # deadline 110 ms
+    e.observe_book(book(101, 102), 110_000_000)
+    assert e.snapshot().latest_follow[0].result is FollowResult.FOLLOW_THROUGH

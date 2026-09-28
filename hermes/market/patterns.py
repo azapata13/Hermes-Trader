@@ -136,6 +136,12 @@ class PatternEngine:
                 self._reason = reason
             self._evict()
             return
+        # Follow-through horizon semantics: a pending trade is judged on the midpoint PREVAILING
+        # AT its deadline. Deadlines that passed strictly before this book event are resolved with
+        # the midpoint that held until now, BEFORE applying this event's midpoint (no look-ahead
+        # past the horizon). A deadline exactly at this event sees this event's midpoint.
+        if self._available and self._mid_x2 is not None:
+            self._resolve_pending(now_ns, strict=True)
         self._available = True
         self._reason = "ok"
         self._mid_x2 = book.bids[0][0] + book.asks[0][0]
@@ -227,10 +233,13 @@ class PatternEngine:
             len(a.prices), a.volume, a.trades
         ))
 
-    def _resolve_pending(self, now_ns: int) -> None:
+    def _resolve_pending(self, now_ns: int, strict: bool = False) -> None:
+        """Resolve pending follow checks whose deadline passed (``strict``: deadline < now)
+        using the CURRENT midpoint, which callers guarantee prevailed at those deadlines."""
         if not self._available or self._mid_x2 is None:
             return
-        while self._pending and self._pending[0].deadline_ns <= now_ns:
+        while self._pending and (self._pending[0].deadline_ns < now_ns if strict
+                                 else self._pending[0].deadline_ns <= now_ns):
             p = self._pending.popleft()
             d = self._mid_x2 - p.start_mid_x2
             favorable = d > 0 if p.aggressor is Aggressor.BUY else d < 0
