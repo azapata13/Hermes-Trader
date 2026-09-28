@@ -69,6 +69,10 @@ class InstrumentSnapshot:
     structure: StructureSnapshot | None = None  # C8 MBP structure measurements
     patterns: PatternSnapshot | None = None     # C8 sweeps + follow-through measurements
     absorption: AbsorptionSnapshot | None = None  # C8 pure derived MBP context
+    # C9: exact grid facts for risk arithmetic (None unless the PriceGrid is uniform and a point is a
+    # whole number of units; MNQ: 4 units per point, 1 unit per tick)
+    units_per_point: int | None = None
+    tick_units: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

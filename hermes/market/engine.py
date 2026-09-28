@@ -79,6 +79,14 @@ ALERT_INTERNAL_ERROR = "internal_error"
 ALERT_READONLY_VIOLATION = "readonly_violation"
 
 
+def _units_per_point(grid: PriceGrid | None) -> int | None:
+    """Whole grid units per 1.0 price point for a uniform grid (MNQ 0.25 -> 4), else None."""
+    if grid is None or not grid.is_uniform:
+        return None
+    q = 1 / grid.unit
+    return int(q) if q == q.to_integral_value() else None
+
+
 def required_streams(sub: SubscriptionsConfig) -> tuple[Stream, ...]:
     out = [Stream.DEPTH]
     if sub.tick_by_tick_bid_ask:
@@ -782,7 +790,9 @@ class MarketEngine:
                 metrics=inst.metrics.snapshot(),
                 structure=structure,
                 patterns=patterns,
-                absorption=absorption))
+                absorption=absorption,
+                units_per_point=_units_per_point(inst.grid),
+                tick_units=inst.grid.step_at(0) if inst.grid is not None and inst.grid.is_uniform else None))
         return MarketSnapshot(
             seq=self.last_seq, mono_ns=self.last_mono_ns, wall_ns=self.last_wall_ns,
             connection=self.connection, farm_broken=self.farm_broken,

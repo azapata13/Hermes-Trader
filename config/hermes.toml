@@ -119,3 +119,17 @@ mode = "HUMAN_APPROVAL"          # the only accepted value in Phase C9
 lookback_5m = 6                  # completed bars; each must be <= [bars].snapshot_bars
 lookback_1m = 10
 lookback_30s = 10
+# ---- C9b conservative multi-timeframe CONTINUATION setup (NONE is a first-class output) ----
+regime_bars_5m = 2               # 5 m regime: completed bars
+setup_bars_1m = 3                # 1 m setup: completed bars
+recent_window_bars_1m = 3        # rolling-window structural extreme (NOT a pivot): last N completed 1 m bars
+entry_hours = "RTH_ONLY"         # RTH from IBKR liquidHours; outside => NONE (outside_authorized_entry_hours)
+orderflow_components = "ofi,trade_flow,microprice,sweep_follow,absorption_compatible"
+orderflow_window_s = 5
+min_primary_confirmations = 1    # PRIMARY (ofi, trade_flow, sweep_follow); microprice/absorption are secondary only
+max_evaluation_lag_ms = 2000     # event time after the 30 s bar end; later => NONE (trigger_evaluation_stale)
+stop_buffer_ticks = 2            # beyond recent_1m_window_low / _high
+min_stop_points = 10.0           # required stop = max(10 pt, structural distance incl. buffer)
+max_stop_points = 12.0           # structure needing more => NONE (never a capped stop inside structure)
+point_value_usd = 2.0            # MNQ $2/pt (reporting only)
+candidate_history = 2880

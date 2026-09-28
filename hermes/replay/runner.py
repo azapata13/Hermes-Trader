@@ -67,6 +67,10 @@ class ReplayOptions:
     compare_live: bool = True                  # compare with <session>/checkpoints.json when present
     sleeper: Callable[[float], None] = time.sleep
     timer: Callable[[], int] = time.perf_counter_ns     # measures elapsed/pacing only, never engine time
+    # Read-only observers (e.g. the C9 CandidateDriver): factories called with the replayed
+    # MarketEngine; each observer's ``after_event(raw, events, now)`` runs after every raw event,
+    # exactly like a live pipeline consumer. Observers must never mutate market state.
+    observers: tuple[Callable[[Any], Any], ...] = ()
 
 
 class Pacer:
@@ -135,6 +139,7 @@ class ReplayResult:
     notes: list[str] = field(default_factory=list)
     policy: CheckpointPolicy | None = None
     engine: Any = None                          # the replayed MarketEngine (not serialized)
+    observers: list = field(default_factory=list)   # instances built from ReplayOptions.observers
 
     # convenience
     @property
@@ -212,6 +217,8 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
     n_events = 0
     internal_errors = 0
     normalize, on_event, observe, after_raw = norm.normalize, eng.on_event, clock.observe, ck.after_raw
+    observers = [make(eng) for make in opt.observers]
+    obs_calls = [o.after_event for o in observers]
     t0 = timer()
     for raw in _batched(src.events(stop_at_gap=opt.stop_at_gap)):
         observe(raw)
@@ -225,7 +232,10 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
         except Exception as exc:  # noqa: BLE001 - same fail-safe as live (a bug replays identically)
             internal_errors += 1
             eng.internal_error(f"{type(raw).__name__} seq={raw.seq}: {exc!r}", raw.recv_mono_ns)
+            events = ()
         after_raw(raw.seq)
+        for call in obs_calls:
+            call(raw, events, raw.recv_mono_ns)
     final = ck.finalize()
     elapsed = (timer() - t0) / 1e9
     ig = src.integrity
@@ -252,7 +262,8 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
         sell_volume=tape.session_cumulative.sell_volume if tape else 0,
         unknown_volume=tape.session_cumulative.unknown_volume if tape else 0,
         bars=(bars.completed_30s, bars.completed_1m, bars.completed_5m) if bars else (0, 0, 0),
-        session_available=bool(sess and sess.calendar_ok), session=sess, notes=notes, policy=policy, engine=eng)
+        session_available=bool(sess and sess.calendar_ok), session=sess, notes=notes, policy=policy, engine=eng,
+        observers=observers)
     if internal_errors:
         notes.append(f"{internal_errors} processing error(s) (engine fail-safe applied, as live would)")
     if ck.dropped:

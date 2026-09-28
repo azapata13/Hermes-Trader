@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (decision context; C9a done).
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅).
 Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -316,6 +316,29 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   and the C7/C8 snapshots with their own availability. UNKNOWN volume is never redistributed; MBP
   epistemic notes travel with every context. Not engine state → no HASH_VERSION bump; determinism
   follows from snapshot determinism (tested, including replayed recordings).
+
+- **C9b SetupCandidate** (`hermes/decision/candidate.py`): one conservative multi-timeframe
+  CONTINUATION family; NONE is first-class. 5 m regime (last `regime_bars_5m`=2 completed bars: quality
+  OK incl. no PARTIAL/empty bars, valid RTH session, VALID-book mid vs **RTH VWAP** (no RTH prints yet ⇒
+  NONE `rth_vwap_unavailable`, never a fallback; full-session VWAP is caution-only), net change, known
+  delta all agree, else NEUTRAL) → 1 m setup (last `setup_bars_1m`=3: agrees, quality, net change, known delta, latest bar
+  direction) → 30 s trigger (latest completed bar: quality, direction, known delta), evaluated ≤
+  `max_evaluation_lag_ms`=2000 (event time) after the bar end (`evaluation_lag_ms` exposed; later ⇒ NONE
+  `trigger_evaluation_stale`) + ≥ `min_primary_confirmations`=1 PRIMARY order-flow votes (C7 OFI, known
+  BUY/SELL trade-flow dominance, sweep with favorable follow-through). SECONDARY evidence (microprice
+  offset, absorption-COMPATIBLE caps) only supports/cautions and never satisfies the requirement; each
+  component is a separate vote; UNKNOWN never votes; opposing ≥ supporting directional votes ⇒ NONE. Entry reference = best ASK (LONG) / best BID (SHORT) of a VALID book; structural
+  invalidation = last `recent_window_bars_1m`=3 completed 1 m bars: recent_1m_window_low/_high (rolling-window extreme, NOT a formal pivot) ∓ 2 ticks; required stop =
+  max(10 pt, structural distance); > 12 pt ⇒ NONE (never a capped stop inside structure); no TP, no partials.
+  Fail-closed gates (connection, contract, LIVE data, 10197, alerts, market_data_ok, VALID book, no active
+  data gap, classification context, uniform grid, session calendar, C7/C8 continuity, RTH_ONLY entry hours
+  from liquidHours). Candidates carry supporting / caution / blocking reasons, per-stage conditions,
+  order-flow evidence, continuity epochs and MBP notes. `CandidateEngine`/`CandidateDriver` live OUTSIDE
+  MarketEngine, evaluate once per event on which a 30 s bar completed, keep a bounded history and a rolling
+  decision fingerprint; the market HASH_VERSION is unchanged and decisions never mutate market state
+  (tested: identical market checkpoints with/without the decision layer). Replay supports read-only
+  observers (`ReplayOptions.observers`). Future memory/shadow/learned/LLM evidence may only be attached as
+  informational `external_evidence`; it can never remove a blocking reason.
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 

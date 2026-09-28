@@ -143,6 +143,10 @@ class BarsConfig:
 
 
 DECISION_MODES = ("HUMAN_APPROVAL",)   # the ONLY mode that exists in Phase C9 (no autonomous execution)
+ENTRY_HOUR_POLICIES = ("RTH_ONLY",)     # RTH from the contract's liquidHours (SessionTracker)
+ORDERFLOW_COMPONENTS = ("ofi", "trade_flow", "microprice", "sweep_follow", "absorption_compatible")
+PRIMARY_ORDERFLOW = ("ofi", "trade_flow", "sweep_follow")          # can satisfy the confirmation requirement
+SECONDARY_ORDERFLOW = ("microprice", "absorption_compatible")      # supporting/caution evidence only
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +158,21 @@ class DecisionConfig:
     lookback_5m: int = 6                   # 5 m regime/context window (30 min)
     lookback_1m: int = 10                  # 1 m setup/local-structure window
     lookback_30s: int = 10                 # 30 s execution-timing window
+    # ---- C9b continuation setup (conservative; NONE is a first-class result) ----
+    regime_bars_5m: int = 2                # completed 5 m bars defining the regime
+    setup_bars_1m: int = 3                 # completed 1 m bars defining the setup
+    recent_window_bars_1m: int = 3         # completed 1 m bars whose rolling extreme is the structure (not a pivot)
+    entry_hours: str = "RTH_ONLY"
+    orderflow_components: str = "ofi,trade_flow,microprice,sweep_follow,absorption_compatible"
+    orderflow_window_s: int = 5            # C7/C8 rolling window used for confirmation (1, 5 or 30)
+    min_primary_confirmations: int = 1     # PRIMARY order-flow votes required (ofi/trade_flow/sweep_follow);
+                                           # secondary evidence never satisfies it; flow alone never creates one
+    max_evaluation_lag_ms: int = 2000      # event time after the 30 s bar end; later => NONE (stale trigger)
+    stop_buffer_ticks: int = 2             # beyond recent_1m_window_low / _high
+    min_stop_points: float = 10.0          # intended initial risk band floor
+    max_stop_points: float = 12.0          # structure needing more => NONE (never a capped, too-tight stop)
+    point_value_usd: float = 2.0           # MNQ: $2 per point per contract (reporting only)
+    candidate_history: int = 2880          # evaluations kept by the CandidateEngine (FIFO)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +328,24 @@ def _validate(cfg: HermesConfig) -> None:
     if d.mode not in DECISION_MODES:
         raise ConfigError(f"[decision].mode must be one of {DECISION_MODES} in Phase C9 "
                           "(no autonomous execution path exists)")
-    for name in ("lookback_5m", "lookback_1m", "lookback_30s"):
+    if d.entry_hours not in ENTRY_HOUR_POLICIES:
+        raise ConfigError(f"[decision].entry_hours must be one of {ENTRY_HOUR_POLICIES}")
+    comps = [c.strip() for c in d.orderflow_components.split(",") if c.strip()]
+    if not comps or any(c not in ORDERFLOW_COMPONENTS for c in comps) or len(set(comps)) != len(comps):
+        raise ConfigError(f"[decision].orderflow_components must be a non-empty subset of {ORDERFLOW_COMPONENTS}")
+    if d.orderflow_window_s not in (1, 5, 30):
+        raise ConfigError("[decision].orderflow_window_s must be 1, 5 or 30")
+    primaries = [c for c in comps if c in PRIMARY_ORDERFLOW]
+    if not (1 <= d.min_primary_confirmations <= len(primaries)):
+        raise ConfigError("[decision].min_primary_confirmations must be in [1, number of configured PRIMARY "
+                          f"components {PRIMARY_ORDERFLOW}]")
+    if d.max_evaluation_lag_ms < 0:
+        raise ConfigError("[decision].max_evaluation_lag_ms must be >= 0")
+    if d.stop_buffer_ticks < 0 or not (0 < d.min_stop_points <= d.max_stop_points):
+        raise ConfigError("[decision] stop settings must satisfy buffer >= 0 and 0 < min_stop <= max_stop")
+    if d.point_value_usd <= 0 or d.candidate_history < 1:
+        raise ConfigError("[decision].point_value_usd must be > 0 and candidate_history >= 1")
+    for name in ("lookback_5m", "lookback_1m", "lookback_30s", "regime_bars_5m", "setup_bars_1m", "recent_window_bars_1m"):
         v = getattr(d, name)
         if not (1 <= v <= br.snapshot_bars):
             raise ConfigError(f"[decision].{name} must be in [1, [bars].snapshot_bars={br.snapshot_bars}]")

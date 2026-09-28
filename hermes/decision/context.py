@@ -32,7 +32,7 @@ from hermes.market.sessions import SessionSnapshot
 from hermes.market.snapshot import InstrumentSnapshot, MarketSnapshot
 from hermes.market.structure import StructureSnapshot
 
-CONTEXT_SCHEMA_VERSION = 1
+CONTEXT_SCHEMA_VERSION = 3
 
 EPISTEMIC_NOTES = (
     "IBKR CME depth is aggregated market-by-price (MBP), not market-by-order (MBO)",
@@ -89,6 +89,8 @@ class PriceContext:
     last_trade_size: int | None
     micro_num: int | None              # microprice = micro_num / micro_den (units)
     micro_den: int | None
+    units_per_point: int | None = None # exact grid facts (None: grid not uniform / unknown)
+    tick_units: int | None = None
 
     @property
     def mid_units(self) -> float | None:
@@ -137,6 +139,7 @@ class BarContext:
         return None if self.high is None or self.low is None else self.high - self.low
 
 
+
 @dataclass(frozen=True, slots=True)
 class SessionContext:
     available: bool
@@ -144,13 +147,21 @@ class SessionContext:
     session: SessionSnapshot | None
     in_trading_session: bool
     in_rth: bool
-    # price relative to the session VWAP: (mid - vwap) = vs_vwap_num / vs_vwap_den units (exact)
+    # price relative to the FULL trading-session VWAP (incl. overnight): (mid - vwap) = num / den units (exact)
     vs_vwap_num: int | None
     vs_vwap_den: int | None
+    # price relative to the RTH VWAP (primary reference for RTH entries); None until RTH prints exist
+    vs_rth_vwap_num: int | None = None
+    vs_rth_vwap_den: int | None = None
 
     @property
     def vs_vwap_units(self) -> float | None:
         return None if self.vs_vwap_num is None or not self.vs_vwap_den else self.vs_vwap_num / self.vs_vwap_den
+
+    @property
+    def vs_rth_vwap_units(self) -> float | None:
+        return (None if self.vs_rth_vwap_num is None or not self.vs_rth_vwap_den
+                else self.vs_rth_vwap_num / self.vs_rth_vwap_den)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +185,10 @@ class DecisionContext:
     bars_5m: BarContext                # regime / market context
     bars_1m: BarContext                # setup confirmation / local structure
     bars_30s: BarContext               # execution timing
+    regime_5m: BarContext              # C9b: last [decision].regime_bars_5m completed 5 m bars
+    setup_1m: BarContext               # C9b: last [decision].setup_bars_1m completed 1 m bars
+    recent_1m_window: BarContext       # C9b: last [decision].recent_window_bars_1m completed 1 m bars; its
+                                       # high/low are the recent_1m_window_high/_low (rolling extreme, NOT a pivot)
     session: SessionContext
     flow: Section                      # C7
     metrics: MetricsSnapshot | None
@@ -228,6 +243,7 @@ def _price(i: InstrumentSnapshot) -> PriceContext:
         last_trade_price=lt.price_units if lt else None, last_trade_size=lt.size if lt else None,
         micro_num=bm.micro_num if valid and bm is not None and bm.available else None,
         micro_den=bm.micro_den if valid and bm is not None and bm.available else None,
+        units_per_point=i.units_per_point, tick_units=i.tick_units,
     )
 
 
@@ -280,13 +296,16 @@ def _session(i: InstrumentSnapshot, price: PriceContext) -> SessionContext:
         return SessionContext(False, "no_session_tracker", None, False, False, None, None)
     if not s.calendar_ok:
         return SessionContext(False, f"calendar_unknown:{s.calendar_error}", s, False, False, None, None)
-    num = den = None
-    st = s.session
+    num = den = rnum = rden = None
+    st, rth = s.session, s.rth
     if st is not None and st.volume and price.mid_x2 is not None:
         num = price.mid_x2 * st.volume - 2 * st.vwap_num
         den = 2 * st.volume
+    if rth is not None and rth.volume and price.mid_x2 is not None:
+        rnum = price.mid_x2 * rth.volume - 2 * rth.vwap_num
+        rden = 2 * rth.volume
     reason = "ok" if s.in_trading_session else "outside_trading_session"
-    return SessionContext(True, reason, s, s.in_trading_session, s.in_rth, num, den)
+    return SessionContext(True, reason, s, s.in_trading_session, s.in_rth, num, den, rnum, rden)
 
 
 def _section(snap_obj, attr_available: str = "available", attr_reason: str = "reason",
@@ -317,6 +336,9 @@ def build_decision_context(snap: MarketSnapshot, cfg: DecisionConfig | None = No
         bars_5m=bar_context(i.bars, 300, cfg.lookback_5m),
         bars_1m=bar_context(i.bars, 60, cfg.lookback_1m),
         bars_30s=bar_context(i.bars, 30, cfg.lookback_30s),
+        regime_5m=bar_context(i.bars, 300, cfg.regime_bars_5m),
+        setup_1m=bar_context(i.bars, 60, cfg.setup_bars_1m),
+        recent_1m_window=bar_context(i.bars, 60, cfg.recent_window_bars_1m),
         session=_session(i, price),
         flow=flow, metrics=m,
         structure_section=_section(st, epoch=st.continuity_epoch if st else None), structure=st,
