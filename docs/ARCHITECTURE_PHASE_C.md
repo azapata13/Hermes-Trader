@@ -1,7 +1,7 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅, C9c candidate lifecycle ✅, C9d SafetyPolicy ✅, C9e approval payload ✅, C9f live/replay integration — code complete, fresh live validation pending; no phase-c9 tag yet).
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 ✅ (decision context, setup candidates, lifecycle, SafetyPolicy, approval payload, live/replay integration — accepted 2026-09-28 on a fresh real MNQ run, tag `phase-c9`; see `docs/C9_FINAL_REPORT.md`).
 Scope: market intelligence + HUMAN_APPROVAL proposals. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
@@ -470,8 +470,8 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   hash, and before/after replays against the C9e code (identical market checkpoints, final hashes and
   decision fingerprints). **Technical debt before any execution phase:** market checkpoint hashing still
   serializes the whole bounded engine state on the dispatch thread at bar closes / health changes /
-  every 10 000 raw events (~20 ms median, ~65 ms p99 on a busy synthetic market after C9f; see the final
-  C9 report for the real-recording numbers). An execution layer must never wait behind it: move
+  every 10 000 raw events (~11 ms median, ~41 ms p99 on the real C9 acceptance recording; ~20 / ~67 ms on
+  a busy synthetic market). An execution layer must never wait behind it: move
   checkpoint hashing off the order-critical path (incremental hashing, or a copy-on-write state capture
   hashed by a separate thread) before real orders/stops exist.
   Acceptance tooling: `tools/c9_acceptance.py --live 60` (fresh READ-ONLY live run + live-vs-replay +
