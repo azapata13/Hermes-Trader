@@ -36,3 +36,9 @@ def test_real_recording_replays_deterministically():
     assert a.final_hash == b.final_hash
     if a.live_compare is not None:
         assert a.live_compare.equivalent, a.live_compare_status
+    # C9f: the decision journal / decision checkpoints are reproduced as well
+    if a.decisions is not None:
+        assert [r.row() for r in a.decisions.journal] == [r.row() for r in b.decisions.journal]
+        assert a.decisions.final == b.decisions.final
+    if a.decision_compare is not None:
+        assert a.decision_compare.equivalent, a.decision_compare_status

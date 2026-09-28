@@ -89,8 +89,24 @@ def render(r) -> list[str]:
                          f"vol {st.volume} observed_from_open={s.observed_from_open} gap={s.gap_observed}")
         else:
             lines.append(f"session     {s.trading_date or 'closed'} (no bar-eligible prints in the current session)")
+    lines.append("MARKET")
     lines.append(f"checkpoints {r.checkpoint_count} + final  (policy every_n={r.policy.every_n}, bar_close, health)")
     lines.append(f"live        {r.live_compare_status}")
+    lines.append("DECISION")
+    d = r.decisions
+    if d is None:
+        lines.append(f"decision    {r.decision_compare_status}")
+    else:
+        c = d.counts()
+        lines.append(f"decision    evaluations {c['evaluations']} (LONG {c['long']} SHORT {c['short']} NONE {c['none']})  "
+                     f"candidates by status {c['candidates_by_status']}  transitions {c['transitions']}")
+        lines.append(f"journal     {c['journal_records']} records {c['journal_by_kind']}  "
+                     f"decision checkpoints {c['decision_checkpoints']} + final")
+        lines.append(f"fingerprint {d.final.fingerprint if d.final else '-'}  "
+                     f"(decision code {r.decision_set.meta['decision_code_fingerprint']})")
+        lines.append(f"live        {r.decision_compare_status}")
+        if r.decision_compare is not None:
+            lines += ["            " + x for x in r.decision_compare.lines()]
     for n in r.notes:
         lines.append(f"note        {n}")
     return lines
@@ -130,9 +146,17 @@ def main(argv: list[str] | None = None) -> int:
         same = ([c.hash for c in r2.checkpoints] == [c.hash for c in r.checkpoints]
                 and [c.key() for c in r2.checkpoints] == [c.key() for c in r.checkpoints]
                 and r2.final_hash == r.final_hash and r2.integrity.raw_digest == r.integrity.raw_digest)
-        print(f"verify      {'IDENTICAL' if same else 'DIFFERENT'} on second FAST replay "
+        print(f"verify      MARKET {'IDENTICAL' if same else 'DIFFERENT'} on second FAST replay "
               f"({len(r2.checkpoints)} checkpoints + final)")
         status |= 0 if same else 1
+        if r.decisions is not None:
+            dsame = (r2.decisions is not None
+                     and [x.row() for x in r2.decisions.journal] == [x.row() for x in r.decisions.journal]
+                     and [x.row() for x in r2.decisions.checkpoints] == [x.row() for x in r.decisions.checkpoints]
+                     and r2.decisions.final == r.decisions.final)
+            print(f"verify      DECISION {'IDENTICAL' if dsame else 'DIFFERENT'} on second FAST replay "
+                  f"({len(r.decisions.journal)} journal records, {len(r.decisions.checkpoints)} checkpoints + final)")
+            status |= 0 if dsame else 1
     if args.compare:
         other = load_checkpoints(Path(args.compare))
         cmp = compare_checkpoints(other.checkpoints, r.checkpoints, other.final, r.final)
@@ -141,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
               f"(only-a {cmp.only_a}, only-b {cmp.only_b}); first mismatch {cmp.first_mismatch}"
               + ("" if code_same else "  [different code fingerprint: informational only]"))
         status |= 0 if cmp.equivalent else 1
+    if r.live_compare is not None and not r.live_compare.equivalent:
+        status |= 1
+    if r.decision_compare is not None and not r.decision_compare.equivalent:
+        status |= 1
     if args.save:
         Path(args.save).write_text(json.dumps(r.to_dict(), separators=(",", ":")))
         print(f"saved       {args.save}")

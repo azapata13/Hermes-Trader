@@ -37,14 +37,75 @@ _CODE_FILES = (
     "hermes/market/orderbook.py", "hermes/market/health.py", "hermes/market/classify.py", "hermes/market/tape.py",
     "hermes/market/metrics.py", "hermes/market/structure.py", "hermes/market/patterns.py", "hermes/market/absorption.py",
     "hermes/market/bars.py", "hermes/market/sessions.py", "hermes/market/engine.py", "hermes/market/snapshot.py",
+    "hermes/market/rolling.py",
     "hermes/replay/fingerprint.py", "hermes/replay/checkpoints.py",
 )
 _REPO = Path(__file__).resolve().parents[2]
 ENGINE_CONFIG_SECTIONS = ("book", "session", "subscriptions", "tape", "bars")
 
 
+# C9f: per-exact-type dispatch for ``canon``. The kind of a type is computed ONCE with exactly the
+# original isinstance order (see ``canon_reference``), so the output is byte-identical; only the
+# repeated isinstance chains / dataclasses.fields() lookups are avoided.
+_PLAIN, _ENUM, _FLOAT, _SEQ, _MAP, _SET, _DC, _ERR = range(8)
+_KINDS: dict[type, int] = {}
+_DC_FIELDS: dict[type, tuple[str, ...]] = {}
+
+
+def _kind_of(t: type) -> int:
+    if t is type(None) or issubclass(t, (bool, str)):
+        k = _PLAIN
+    elif issubclass(t, Enum):
+        k = _ENUM
+    elif issubclass(t, int):
+        k = _PLAIN
+    elif issubclass(t, float):
+        k = _FLOAT
+    elif issubclass(t, (tuple, list)):
+        k = _SEQ
+    elif issubclass(t, dict):
+        k = _MAP
+    elif issubclass(t, (set, frozenset)):
+        k = _SET
+    elif dataclasses.is_dataclass(t):
+        k = _DC
+        _DC_FIELDS[t] = tuple(f.name for f in dataclasses.fields(t))
+    else:
+        k = _ERR
+    _KINDS[t] = k
+    return k
+
+
 def canon(obj: Any) -> Any:
-    """Canonical JSON-able form. Enums -> value, dataclasses -> [name, fields...], maps sorted."""
+    """Canonical JSON-able form. Enums -> value, dataclasses -> [name, fields...], maps sorted.
+    Byte-identical to ``canon_reference`` (tested); faster via cached per-type dispatch."""
+    t = type(obj)
+    k = _KINDS.get(t)
+    if k is None:
+        k = _kind_of(t)
+    if k == _PLAIN:
+        return obj
+    if k == _SEQ:
+        kinds = _KINDS
+        return [x if kinds.get(type(x)) == _PLAIN else canon(x) for x in obj]
+    if k == _DC:
+        return [t.__name__, [canon(getattr(obj, n)) for n in _DC_FIELDS[t]]]
+    if k == _ENUM:
+        v = obj.value
+        return int(v) if isinstance(v, int) else v
+    if k == _FLOAT:
+        return ["f", repr(obj)]
+    if k == _MAP:
+        items = [[canon(kk), canon(v)] for kk, v in obj.items()]
+        items.sort(key=lambda kv: json.dumps(kv[0], sort_keys=True))
+        return ["map", items]
+    if k == _SET:
+        return ["set", sorted((canon(x) for x in obj), key=lambda x: json.dumps(x, sort_keys=True))]
+    return canon_reference(obj)          # anything unusual: the original rules decide (incl. TypeError)
+
+
+def canon_reference(obj: Any) -> Any:
+    """The original canonicalization (kept for equivalence tests)."""
     if obj is None or isinstance(obj, (bool, str)):
         return obj
     if isinstance(obj, Enum):
@@ -55,15 +116,15 @@ def canon(obj: Any) -> Any:
     if isinstance(obj, float):
         return ["f", repr(obj)]
     if isinstance(obj, (tuple, list)):
-        return [canon(x) for x in obj]
+        return [canon_reference(x) for x in obj]
     if isinstance(obj, dict):
-        items = [[canon(k), canon(v)] for k, v in obj.items()]
+        items = [[canon_reference(k), canon_reference(v)] for k, v in obj.items()]
         items.sort(key=lambda kv: json.dumps(kv[0], sort_keys=True))
         return ["map", items]
     if isinstance(obj, (set, frozenset)):
-        return ["set", sorted((canon(x) for x in obj), key=lambda x: json.dumps(x, sort_keys=True))]
+        return ["set", sorted((canon_reference(x) for x in obj), key=lambda x: json.dumps(x, sort_keys=True))]
     if dataclasses.is_dataclass(obj):
-        return [type(obj).__name__, [canon(getattr(obj, f.name)) for f in dataclasses.fields(obj)]]
+        return [type(obj).__name__, [canon_reference(getattr(obj, f.name)) for f in dataclasses.fields(obj)]]
     raise TypeError(f"not canonicalizable: {type(obj).__name__}")
 
 

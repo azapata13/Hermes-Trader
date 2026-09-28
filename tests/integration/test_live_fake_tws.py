@@ -104,6 +104,10 @@ def assert_replay_equivalent(rt):
     assert r.live_compare is not None and r.live_compare.equivalent, r.live_compare_status
     assert r.live_compare.final_match and r.final_hash == rt.checkpointer.final.hash
     assert r.live_compare.compared == len(rt.checkpointer.checkpoints) > 0
+    # C9f: the decision journal + decision checkpoints are reproduced too (separate from market hashes)
+    assert rt.decision_file is not None and rt.decision_file.exists()
+    assert r.decision_compare is not None and r.decision_compare.equivalent, r.decision_compare_status
+    assert r.decisions.final == rt.decisions.final
     return ver
 
 

@@ -13,6 +13,7 @@ from math import lcm
 
 from hermes.market.classify import Aggressor
 from hermes.market.orderbook import BookSnapshot, BookState
+from hermes.market.rolling import WindowSums
 from hermes.market.tape import ClassifiedTrade
 
 _S = 1_000_000_000
@@ -225,6 +226,8 @@ class MetricsEngine:
         "instrument_id", "continuity_epoch", "_book_valid", "_book_reason", "_book_snapshot",
         "_prev_l1", "_event_ofi", "_ofi_events", "_trades", "_depth_events", "_bbo_events",
         "_midpoints", "_last_prices", "_now_ns",
+        # C9f derived caches (NOT part of fingerprint_state): exact rolling sums per window
+        "_r_ofi", "_r_trades", "_r_depth", "_r_bbo", "_mid_sorted", "_last_sorted",
     )
 
     def __init__(self, instrument_id: int) -> None:
@@ -242,12 +245,20 @@ class MetricsEngine:
         self._midpoints: deque[tuple[int, int]] = deque()
         self._last_prices: deque[tuple[int, int]] = deque()
         self._now_ns = 0
+        wns = tuple(w * _S for w in WINDOWS_S)
+        self._r_ofi = WindowSums(wns, 2)          # (value, events)
+        self._r_trades = WindowSums(wns, 6)       # (bv, sv, uv, bt, st, ut)
+        self._r_depth = WindowSums(wns, 1)
+        self._r_bbo = WindowSums(wns, 1)
+        self._mid_sorted = True
+        self._last_sorted = True
 
     def observe_book(self, book: BookSnapshot, now_ns: int, *, depth_event: bool = False) -> None:
         self._advance_clock(now_ns)
         self._book_snapshot = book
         if depth_event:
             self._depth_events.append(now_ns)
+            self._r_depth.push(now_ns, (1,), self._now_ns)
 
         if book.state is not BookState.VALID or not book.bids or not book.asks:
             if self._book_valid:
@@ -270,24 +281,34 @@ class MetricsEngine:
             val = _ofi(self._prev_l1, cur)
             self._event_ofi = val
             self._ofi_events.append((now_ns, val))
+            self._r_ofi.push(now_ns, (val, 1), self._now_ns)
             self._prev_l1 = cur
         else:
             self._prev_l1 = cur
 
         if not self._midpoints or self._midpoints[-1][1] != mid_x2:
+            if self._midpoints and now_ns < self._midpoints[-1][0]:
+                self._mid_sorted = False
             self._midpoints.append((now_ns, mid_x2))
         self._evict()
 
     def on_bbo(self, now_ns: int) -> None:
         self._advance_clock(now_ns)
         self._bbo_events.append(now_ns)
+        self._r_bbo.push(now_ns, (1,), self._now_ns)
         self._evict()
 
     def on_trade(self, trade: ClassifiedTrade) -> None:
         now_ns = trade.recv_mono_ns
         self._advance_clock(now_ns)
         self._trades.append((now_ns, trade.size, trade.aggressor, trade.price_units))
+        size, side = trade.size, trade.aggressor
+        vals = ((size, 0, 0, 1, 0, 0) if side is Aggressor.BUY else
+                (0, size, 0, 0, 1, 0) if side is Aggressor.SELL else (0, 0, size, 0, 0, 1))
+        self._r_trades.push(now_ns, vals, self._now_ns)
         if not self._last_prices or self._last_prices[-1][1] != trade.price_units:
+            if self._last_prices and now_ns < self._last_prices[-1][0]:
+                self._last_sorted = False
             self._last_prices.append((now_ns, trade.price_units))
         self._evict()
 
@@ -307,6 +328,7 @@ class MetricsEngine:
         self.continuity_epoch += 1
         self._trades.clear()
         self._last_prices.clear()
+        self._clear_trade_cache()
 
     def break_all(self, reason: str, now_ns: int | None = None) -> None:
         if now_ns is not None:
@@ -317,6 +339,9 @@ class MetricsEngine:
         self._depth_events.clear()
         self._bbo_events.clear()
         self._last_prices.clear()
+        self._clear_trade_cache()
+        self._r_depth.clear()
+        self._r_bbo.clear()
 
     def _break_book(self, reason: str) -> None:
         self._book_valid = False
@@ -326,6 +351,12 @@ class MetricsEngine:
         self._event_ofi = None
         self._ofi_events.clear()
         self._midpoints.clear()
+        self._r_ofi.clear()
+        self._mid_sorted = True
+
+    def _clear_trade_cache(self) -> None:
+        self._r_trades.clear()
+        self._last_sorted = True
 
     def _advance_clock(self, now_ns: int) -> None:
         if now_ns > self._now_ns:
@@ -348,6 +379,40 @@ class MetricsEngine:
     @staticmethod
     def _since(window_s: int, now_ns: int) -> int:
         return now_ns - window_s * _S
+
+    # ---- C9f fast windows: exact rolling sums; fall back to the original rescans if inexact
+    def _ofi_window_fast(self, i: int, seconds: int) -> OfiWindow:
+        s = self._r_ofi.sums_at(i, self._now_ns)
+        return self._ofi_window(seconds) if s is None else OfiWindow(seconds, s[0], s[1])
+
+    def _trade_window_fast(self, i: int, seconds: int) -> TradeFlow:
+        s = self._r_trades.sums_at(i, self._now_ns)
+        return self._trade_window(seconds) if s is None else TradeFlow(seconds, *s)
+
+    def _velocity_window_fast(self, i: int, seconds: int) -> Velocity:
+        t = self._r_trades.sums_at(i, self._now_ns)
+        d = self._r_depth.sums_at(i, self._now_ns)
+        b = self._r_bbo.sums_at(i, self._now_ns)
+        if t is None or d is None or b is None:
+            return self._velocity_window(seconds)
+        bv, sv, uv, bt, st, ut = t
+        return Velocity(seconds=seconds, trades=bt + st + ut, contracts=bv + sv + uv, buy_contracts=bv,
+                        sell_contracts=sv, depth_updates=d[0], bbo_updates=b[0])
+
+    @classmethod
+    def _price_change_fast(cls, points: deque[tuple[int, int]], now_ns: int, seconds: int,
+                           is_sorted: bool) -> int | None:
+        """Same anchor as ``_price_change`` (last point with t <= now - window). For time-sorted
+        points and short windows it is found scanning from the newest end."""
+        if not is_sorted or seconds >= 30:
+            return cls._price_change(points, now_ns, seconds)
+        if not points:
+            return None
+        target = now_ns - seconds * _S
+        for t, value in reversed(points):
+            if t <= target:
+                return points[-1][1] - value
+        return None
 
     def _ofi_window(self, seconds: int) -> OfiWindow:
         cutoff = self._since(seconds, self._now_ns)
@@ -408,14 +473,30 @@ class MetricsEngine:
             continuity_epoch=self.continuity_epoch,
             book=book,
             event_ofi=self._event_ofi,
+            ofi=tuple(self._ofi_window_fast(i, w) for i, w in enumerate(WINDOWS_S)),
+            trade_flow=tuple(self._trade_window_fast(i, w) for i, w in enumerate(WINDOWS_S)),
+            velocity=tuple(self._velocity_window_fast(i, w) for i, w in enumerate(WINDOWS_S)),
+            price_move=tuple(PriceMove(
+                w,
+                self._price_change_fast(self._midpoints, self._now_ns, w, self._mid_sorted),
+                self._price_change_fast(self._last_prices, self._now_ns, w, self._last_sorted),
+            ) for w in WINDOWS_S),
+        )
+
+    def snapshot_reference(self) -> MetricsSnapshot:
+        """The original full-rescan snapshot (equivalence tests / benchmarks only)."""
+        book = (book_metrics(self._book_snapshot, self.continuity_epoch)
+                if self._book_snapshot is not None
+                else BookMetrics(False, self._book_reason, self.continuity_epoch,
+                                 None, None, None, None, None, None, None, None, None, None, None))
+        return MetricsSnapshot(
+            continuity_epoch=self.continuity_epoch, book=book, event_ofi=self._event_ofi,
             ofi=tuple(self._ofi_window(w) for w in WINDOWS_S),
             trade_flow=tuple(self._trade_window(w) for w in WINDOWS_S),
             velocity=tuple(self._velocity_window(w) for w in WINDOWS_S),
-            price_move=tuple(PriceMove(
-                w,
-                self._price_change(self._midpoints, self._now_ns, w),
-                self._price_change(self._last_prices, self._now_ns, w),
-            ) for w in WINDOWS_S),
+            price_move=tuple(PriceMove(w, self._price_change(self._midpoints, self._now_ns, w),
+                                       self._price_change(self._last_prices, self._now_ns, w))
+                             for w in WINDOWS_S),
         )
 
     def token(self) -> tuple:

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hermes.config import ConfigError, HermesConfig, config_from_mapping, load_config
+from hermes.decision.runtime import DecisionRuntime
 from hermes.ibkr.normalizer import NORMALIZER_VERSION, Normalizer
 from hermes.market.engine import MarketEngine
 from hermes.replay import fingerprint as fp
@@ -48,6 +49,8 @@ from hermes.replay.checkpoints import (
     load_checkpoints,
 )
 from hermes.replay.clock import ReplayClock
+from hermes.replay.decisions import (
+    DECISIONS_SIDECAR, DecisionCompare, DecisionSet, compare_decisions, decision_meta, load_decisions)
 from hermes.replay.source import Integrity, RecordingInfo, RecordingSource
 
 
@@ -71,6 +74,8 @@ class ReplayOptions:
     # MarketEngine; each observer's ``after_event(raw, events, now)`` runs after every raw event,
     # exactly like a live pipeline consumer. Observers must never mutate market state.
     observers: tuple[Callable[[Any], Any], ...] = ()
+    # C9f: the SAME DecisionRuntime as the live pipeline (when [decision].enabled in the replay config)
+    decisions: bool = True
 
 
 class Pacer:
@@ -140,6 +145,10 @@ class ReplayResult:
     policy: CheckpointPolicy | None = None
     engine: Any = None                          # the replayed MarketEngine (not serialized)
     observers: list = field(default_factory=list)   # instances built from ReplayOptions.observers
+    decisions: Any = None                       # the replayed DecisionRuntime (None if disabled)
+    decision_set: DecisionSet | None = None
+    decision_compare: DecisionCompare | None = None
+    decision_compare_status: str = ""
 
     # convenience
     @property
@@ -217,8 +226,9 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
     n_events = 0
     internal_errors = 0
     normalize, on_event, observe, after_raw = norm.normalize, eng.on_event, clock.observe, ck.after_raw
+    drt = DecisionRuntime(eng, cfg.decision) if (opt.decisions and cfg.decision.enabled) else None
     observers = [make(eng) for make in opt.observers]
-    obs_calls = [o.after_event for o in observers]
+    obs_calls = ([drt.after_event] if drt is not None else []) + [o.after_event for o in observers]
     t0 = timer()
     for raw in _batched(src.events(stop_at_gap=opt.stop_at_gap)):
         observe(raw)
@@ -237,6 +247,8 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
         for call in obs_calls:
             call(raw, events, raw.recv_mono_ns)
     final = ck.finalize()
+    if drt is not None:
+        drt.finalize()
     elapsed = (timer() - t0) / 1e9
     ig = src.integrity
 
@@ -269,7 +281,44 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
     if ck.dropped:
         notes.append(f"{ck.dropped} checkpoint(s) dropped (max_checkpoints)")
     _compare_live(res, live, cfg, ck)
+    if drt is not None:
+        res.decisions = drt
+        res.decision_set = DecisionSet.from_runtime(drt, **decision_meta(cfg, res.code_fingerprint,
+                                                                         res.config_fingerprint))
+        _compare_live_decisions(res, src.session_dir / DECISIONS_SIDECAR, opt.compare_live)
+    else:
+        res.decision_compare_status = "decision layer disabled in the replay config"
     return res
+
+
+def _compare_live_decisions(res: ReplayResult, sidecar: Path, enabled: bool) -> None:
+    if not enabled or not sidecar.exists():
+        res.decision_compare_status = "no live decision journal (recording predates C9f or live run did not shut down "\
+                                      "cleanly): replay-to-replay reproducibility only"
+        return
+    try:
+        live = load_decisions(sidecar)
+    except (ValueError, KeyError, TypeError) as exc:
+        res.decision_compare_status = f"{DECISIONS_SIDECAR} unreadable: {exc}"
+        return
+    mine = res.decision_set.meta  # type: ignore[union-attr]
+    reasons = [f"{k} {live.meta.get(k)} != {mine[k]}" for k in
+               ("decision_code_fingerprint", "decision_config_fingerprint", "code_fingerprint", "config_fingerprint")
+               if live.meta.get(k) != mine[k]]
+    if reasons:
+        res.decision_compare_status = ("different decision/market code or config than the live run — NO decision "
+                                       "equivalence claim: " + "; ".join(reasons))
+        return
+    ig = res.integrity
+    limit = None if ig.replay_complete else ig.complete_through_seq
+    r = compare_decisions(live, res.decision_set, limit_seq=limit)  # type: ignore[arg-type]
+    res.decision_compare = r
+    scope = "full recording" if limit is None else f"verified prefix through seq {limit}"
+    res.decision_compare_status = (f"same-code live vs replay: {'EQUIVALENT' if r.equivalent else 'MISMATCH'} — "
+                                   f"{r.journal_matched}/{max(r.journal)} journal records, "
+                                   f"{r.checkpoints_matched}/{max(r.checkpoints)} decision checkpoints, final "
+                                   f"{'match' if r.final_match else ('n/a' if not r.final_compared else 'DIFF')}; "
+                                   f"{scope}" + (f"; first mismatch {r.first_mismatch}" if r.first_mismatch else ""))
 
 
 def _compare_live(res: ReplayResult, live, cfg: HermesConfig, ck: Checkpointer) -> None:

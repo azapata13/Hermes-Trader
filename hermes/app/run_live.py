@@ -1,4 +1,5 @@
-"""Hermès Phase C live entry point (market intelligence only — READ-ONLY, no orders).
+"""Hermès Phase C live entry point (market intelligence + HUMAN_APPROVAL decision proposals —
+READ-ONLY, no orders, no execution path).
 
     python -m hermes.app.run_live [--config config/hermes.toml] [--duration 60] [--no-record] [--quiet]
 
@@ -23,9 +24,12 @@ from typing import Any
 
 import ibapi
 
+import hermes
 from hermes.config import ConfigError, HermesConfig, load_config, DEFAULT_CONFIG_PATH
 from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
+from hermes.decision.approval import render_approval_text
+from hermes.decision.runtime import DecisionRuntime, JournalKind, JournalRecord
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.adapter import RawPipeline
 from hermes.ibkr.gateway import RequestGateway
@@ -35,11 +39,13 @@ from hermes.market.engine import MarketEngine
 from hermes.market.snapshot import MarketSnapshot, SnapshotPublisher
 from hermes.replay import fingerprint as fp
 from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
+from hermes.replay.decisions import DECISIONS_SIDECAR, decision_meta, save_decisions
 from hermes.storage.reader import verify_session
 from hermes.storage.recorder import Recorder
 
-HERMES_VERSION = "0.8.0-c8"
+HERMES_VERSION = hermes.__version__
 log = logging.getLogger("hermes.app")
+dlog = logging.getLogger("hermes.decision")
 _REPO = Path(__file__).resolve().parents[2]
 
 
@@ -124,6 +130,13 @@ class LiveRuntime:
         self.checkpointer = Checkpointer(self.engine)
         self.pipeline.consumers.append(self.checkpointer)
         self.checkpoint_file: Path | None = None
+        # C9f: the SAME decision runtime as replay, as a read-only consumer AFTER the checkpointer
+        # (replay runs it after the checkpointer too). Proposals only: HUMAN_APPROVAL, no order path.
+        self.decisions: DecisionRuntime | None = (
+            DecisionRuntime(self.engine, cfg.decision, on_record=self._on_decision) if cfg.decision.enabled else None)
+        if self.decisions is not None:
+            self.pipeline.consumers.append(self.decisions)
+        self.decision_file: Path | None = None
         self.supervisor = Supervisor(cfg, self.pipeline, self.gateway, self.session)
         self.max_msg_queue = 0
         self._violations_reported = 0
@@ -133,9 +146,7 @@ class LiveRuntime:
 
     # ------------------------------------------------------------------ lifecycle
     def run(self, duration_s: float | None = None, install_signals: bool = True) -> dict[str, Any]:
-        if self.recorder is not None:
-            self.recorder.start()
-            log.info("recording to %s", self.recorder.session_dir)
+        self.start_recording()
         if install_signals:
             self.supervisor.install_signal_handlers()
         self.heartbeat.start()
@@ -144,14 +155,49 @@ class LiveRuntime:
             self.supervisor.run(duration_s)
         finally:
             self.heartbeat.stop()
-            self.pipeline.pump()
-            self.checkpointer.finalize()           # dispatch thread has ended; single reader now
-            self.reporter.stop()
-            if self.recorder is not None:
-                self.recorder.stop()
-                self.verification = verify_session(self.recorder.session_dir)
-                self._save_checkpoints()
+            self.finish()
         return self.summary()
+
+    def start_recording(self) -> None:
+        if self.recorder is not None:
+            self.recorder.start()
+            log.info("recording to %s", self.recorder.session_dir)
+
+    def finish(self) -> None:
+        """Shutdown bookkeeping once the dispatch thread has ended (single reader from here on)."""
+        self.pipeline.pump()
+        self.checkpointer.finalize()
+        if self.decisions is not None:
+            self.decisions.finalize()
+        self.reporter.stop()
+        if self.recorder is not None:
+            self.recorder.stop()
+            self.verification = verify_session(self.recorder.session_dir)
+            self._save_checkpoints()
+            self._save_decisions()
+
+    def _save_decisions(self) -> None:
+        """Persist the decision journal + decision checkpoints (separate from market checkpoints)."""
+        if self.decisions is None:
+            return
+        try:
+            self.decision_file = save_decisions(
+                self.decisions, Path(self.recorder.session_dir) / DECISIONS_SIDECAR,  # type: ignore[union-attr]
+                source="live", session_id=self.recorder.session_id,  # type: ignore[union-attr]
+                hermes_version=HERMES_VERSION,
+                **decision_meta(self.cfg, fp.code_fingerprint(), fp.config_fingerprint(self.cfg)))
+        except OSError as exc:
+            log.error("could not write the decision journal: %s", exc)
+
+    def _on_decision(self, r: JournalRecord, view) -> None:
+        """Compact decision log line per journal record (decision transitions only, never per tick)."""
+        blocks = [f"{c[1]}/{c[2]}" for c in r.reasons if c[0] in ("BLOCK", "HOLD")][:4]
+        dlog.info("%s seq=%d %s %s %s%s%s%s", r.kind.value, r.seq, r.setup_id or "-", r.status or "-",
+                  r.direction or "", f" proposal={r.proposal_id}" if r.proposal_id else "",
+                  f" view={r.approval_view_id}" if r.approval_view_id else "",
+                  (" " + ",".join(blocks)) if blocks else "")
+        if view is not None and r.kind is JournalKind.APPROVAL_VIEW_CREATED:
+            dlog.info("HUMAN_APPROVAL view (inspection only; Hermès sends no order):\n%s", render_approval_text(view))
 
     def _save_checkpoints(self) -> None:
         """Persist live checkpoints next to the recording (never on the dispatch thread)."""
@@ -264,6 +310,12 @@ class LiveRuntime:
         rep["gateway"] = {"sent": self.gateway.sent, "rate_limited": self.gateway.rate_limited,
                           "failed": self.gateway.failed}
         rep["session_phase"] = self.session.phase.value
+        d = self.decisions
+        if d is not None:
+            last = d.journal[-1] if d.journal else None     # list append is atomic; read-only view
+            rep["decision"] = {"evaluations": d.driver.candidates.stats.evaluations,
+                               "journal": len(d.journal), "active": len(d.driver.lifecycle.active),
+                               "last": None if last is None else [last.kind.value, last.status, last.setup_id]}
         return rep
 
     @staticmethod
@@ -295,6 +347,11 @@ class LiveRuntime:
                              + (f" FLAGS={bb['active_flags']}" if bb["active_flags"] else ""))
             if ss and ss["calendar_ok"]:
                 parts.append(f"sess={ss['trading_date']}{'/RTH' if ss['in_rth'] else ''} vwap={ss['vwap']}")
+        dec = rep.get("decision")
+        if dec:
+            last = dec["last"]
+            parts.append(f"dec eval={dec['evaluations']} active={dec['active']}"
+                         + (f" last={last[0]}:{last[1]}" if last else ""))
         r = rep.get("recorder")
         if r:
             parts.append(f"rec backlog={r['backlog']} drops={r['dropped_overflow']} gaps={r['gaps_written']}")
@@ -324,6 +381,7 @@ class LiveRuntime:
             problems.append(f"{self.pipeline.internal_errors} internal error(s)")
         if ver is not None and not ver.replay_complete:
             problems.append("recording NOT replay-complete: " + "; ".join(ver.problems))
+        dec = self.decision_summary(snap.seq if snap is not None else None)
         return {
             "healthy": not problems, "problems": problems, "time_to_market_data_ok_s": first_ok_s,
             "contract": inst.local_symbol if inst else None, "con_id": inst.con_id if inst else None,
@@ -334,11 +392,36 @@ class LiveRuntime:
             "live_checkpoints": len(self.checkpointer.checkpoints),
             "final_state_hash": self.checkpointer.final.hash if self.checkpointer.final else None,
             "connect_attempts": self.supervisor.connect_attempts,
+            "connection_before_shutdown": snap.connection.value if snap is not None else None,
+            "live_data_confirmed": bool(inst and inst.market_data_type == 1 and self.pipeline.ever_market_data_ok),
+            "read_only_violations": violations,
+            "hermes_version": HERMES_VERSION, "git_commit": git_commit(), "code_fingerprint": fp.code_fingerprint(),
+            **dec,
+        }
+
+    def decision_summary(self, pre_shutdown_seq: int | None) -> dict[str, Any]:
+        d = self.decisions
+        if d is None:
+            return {"decision_layer": "disabled"}
+        c = d.counts()
+        pre = [r for r in d.journal if pre_shutdown_seq is None or r.seq <= pre_shutdown_seq]
+        pre_cp = [cp for cp in d.checkpoints if pre_shutdown_seq is None or cp.seq <= pre_shutdown_seq]
+        return {
+            "decision_evaluations": c["evaluations"],
+            "decision_candidates_by_status": c["candidates_by_status"],
+            "decision_transitions": c["transitions"],
+            "decision_journal_records": c["journal_records"],
+            "decision_checkpoints": c["decision_checkpoints"],
+            "decision_final_fingerprint": d.final.fingerprint if d.final else None,
+            "decision_pre_shutdown": {"seq": pre_shutdown_seq, "journal_records": len(pre),
+                                      "evaluations": sum(1 for r in pre if r.kind is JournalKind.DECISION_EVALUATED),
+                                      "last_checkpoint": pre_cp[-1].row() if pre_cp else None},
+            "decision_file": str(self.decision_file) if self.decision_file else None,
         }
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Hermès Phase C live market engine (READ-ONLY)")
+    ap = argparse.ArgumentParser(description="Hermès Phase C live market engine + HUMAN_APPROVAL proposals (READ-ONLY)")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--duration", type=float, default=None, help="stop after N seconds (smoke test)")
     ap.add_argument("--no-record", action="store_true")
@@ -356,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = rt.run(args.duration)
     finally:
         handle.stop()
-    print("\n=========== HERMÈS C3 RUN SUMMARY ===========")
+    print(f"\n=========== HERMÈS {HERMES_VERSION} RUN SUMMARY (READ-ONLY, no orders) ===========")
     for k, v in summary.items():
         if k != "problems":
             print(f"{k:28s} {v}")

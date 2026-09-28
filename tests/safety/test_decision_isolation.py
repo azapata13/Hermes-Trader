@@ -65,3 +65,17 @@ def test_human_response_module_has_no_order_path():
     assert 'return False' in src.split("def authorizes_execution", 1)[1].split("def ", 1)[0]
     assert "ExecutionPrerequisites(False," in src                         # never satisfiable in Phase C9
     assert execution_prerequisites.__module__ == "hermes.decision.response"
+
+
+def test_decision_persistence_and_runtime_have_no_broker_path():
+    """C9f: the decision journal persistence (hermes/replay/decisions.py) and the runtime consumer
+    import no broker / app / network code; the live wiring passes only the read-only engine."""
+    mods = {m for _, m in _imports(ROOT / "hermes" / "replay" / "decisions.py")}
+    assert mods <= {"__future__", "dataclasses", "hashlib", "json", "pathlib", "typing",
+                    "hermes.decision.runtime", "hermes.replay.fingerprint"}, mods
+    rt_mods = {m for _, m in _imports(DECISION / "runtime.py")}
+    assert not any(m.startswith(FORBIDDEN_PREFIXES) for m in rt_mods), rt_mods
+    for f in (ROOT / "hermes" / "replay" / "decisions.py", DECISION / "runtime.py", ROOT / "hermes" / "market" / "rolling.py"):
+        src = f.read_text(encoding="utf-8")
+        for word in ("placeOrder", "cancelOrder", "reqGlobalCancel", "EClient", "RequestGateway", "gateway"):
+            assert word not in src, f"{f.name} mentions {word}"

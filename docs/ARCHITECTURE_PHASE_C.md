@@ -1,8 +1,8 @@
 # Hermès — Phase C Architecture (Market Engine / Order-Flow Intelligence)
 
 Status: **APPROVED** — architecture review + amendments (2026-09-24), C3 decisions and amendments A–F.
-Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅, C9c candidate lifecycle ✅).
-Scope: market intelligence only. **No order execution. TWS API stays Read-Only.**
+Implementation: C1 ✅ C2 ✅ C3 ✅ (live-validated) C3.1 ✅ · C4 ✅ (tape/classifier) · C5 ✅ (bars/session) · C6 ✅ (deterministic replay) · C7 ✅ (metrics) · C8 ✅ (structure/patterns/absorption-compatible) · C9 🚧 (C9a decision context ✅, C9b setup candidates ✅, C9c candidate lifecycle ✅, C9d SafetyPolicy ✅, C9e approval payload ✅, C9f live/replay integration — code complete, fresh live validation pending; no phase-c9 tag yet).
+Scope: market intelligence + HUMAN_APPROVAL proposals. **No order execution. TWS API stays Read-Only.**
 
 This document is the reference design for Phase C. When code and this document
 disagree, one of them is a bug: fix the code or amend this document explicitly.
@@ -300,7 +300,7 @@ Regression tests: `test_follow_through_never_uses_a_midpoint_from_after_the_hori
 `test_deadline_exactly_at_book_event_sees_that_event` (three C8 tests that encoded the look-ahead were
 corrected). HASH_VERSION unchanged (summary structure unchanged); the code fingerprint changes.
 
-## 8e. C9 — Decision context and setup candidates (in progress)
+## 8e. C9 — Decision context, setup candidates, safety, approval, live/replay integration
 
 No order path, ever: `[decision].mode` accepts only `HUMAN_APPROVAL`; `hermes/decision/` may import
 only config/market/fingerprint code (safety test `tests/safety/test_decision_isolation.py`).
@@ -437,6 +437,45 @@ only config/market/fingerprint code (safety test `tests/safety/test_decision_iso
   Phase C9 (`risk_eligibility_policy_not_implemented`, `execution_layer_disabled`). An old
   `approval_allowed_now=True` is never trusted. Nothing is sent: no Slack, no network, no broker;
   building/rendering changes no state, and ids + texts are identical live and in two replays (tested).
+
+- **C9f live / replay integration** (`hermes/decision/runtime.py`, `hermes/replay/decisions.py`,
+  `hermes/app/run_live.py`, `hermes/replay/runner.py`): ONE `DecisionRuntime` (CandidateDriver ->
+  DecisionContext -> SetupCandidate -> lifecycle -> SafetyPolicy -> ApprovalPayload at ACTIONABLE creation)
+  is a read-only pipeline consumer in `LiveRuntime` (after the market `Checkpointer`) and the built-in replay
+  observer in `replay_session` (same position) — no simplified replay path. Per raw event it is O(1) unless
+  a 30 s bar completed (one evaluation) or a candidate is ACTIONABLE (one lifecycle re-check).
+  **Decision journal** (append-only, compact, deterministic; decision transitions only, never per tick):
+  DECISION_EVALUATED, CANDIDATE_ACTIONABLE, APPROVAL_VIEW_CREATED, TEMPORARY_HOLD_ENTERED / _CLEARED,
+  CANDIDATE_BLOCKED / _STALE / _INVALIDATED / _EXPIRED; each record carries event seq and time, instrument,
+  setup_id, proposal_id, approval_view_id, status, direction, approval_allowed_now, reason codes
+  (severity, source, code) and the decision fingerprint — no snapshots. **Decision checkpoints**
+  `(seq, kinds, fingerprint)` after every journal event + final. Both are written at shutdown to
+  `<session>/decisions.json` (never on the dispatch thread), SEPARATE from `checkpoints.json`; the
+  decision state never enters the market state hash (HASH_VERSION stays 4). Replay compares the live
+  journal record by record, every decision checkpoint and the final decision fingerprint (claim only with
+  the same decision code/config and market code/config; verified prefix on incomplete recordings) and
+  `tools/replay_report.py --verify` requires a second FAST replay to be IDENTICAL for market AND decision
+  outputs. The live runtime logs one compact line per journal record (and the rendered approval view
+  when a candidate becomes ACTIONABLE; inspection only), shows `dec eval=… active=… last=…` in the
+  periodic console line and reports decision counts / transitions / final fingerprint (plus the last
+  pre-shutdown decision observation) in the run summary. `HumanApprovalResponse` stays data: there is no
+  execution callback and `execution_prerequisites` still fails with `risk_eligibility_policy_not_implemented`
+  and `execution_layer_disabled`. Runtime version `0.9.0-c9` (`hermes.__version__`; pyproject `0.9.0+c9`).
+  **Performance (behavior-identical):** C7 metrics and C8 structure 1 s / 5 s / 30 s windows use exact
+  cumulative rolling sums (`hermes/market/rolling.py`: O(1) per event, O(1) per snapshot, bounded memory,
+  automatic fallback to the original rescans if time order is ever violated) instead of rescanning the
+  30 s event lists; `fingerprint_state` is unchanged. `fingerprint.canon` uses cached per-type dispatch and
+  is byte-identical to the original (`canon_reference`). Proven by per-event equality against the original
+  rescans (busy synthetic market, trend scenarios, out-of-order input), byte/hash equality of the state
+  hash, and before/after replays against the C9e code (identical market checkpoints, final hashes and
+  decision fingerprints). **Technical debt before any execution phase:** market checkpoint hashing still
+  serializes the whole bounded engine state on the dispatch thread at bar closes / health changes /
+  every 10 000 raw events (~20 ms median, ~65 ms p99 on a busy synthetic market after C9f; see the final
+  C9 report for the real-recording numbers). An execution layer must never wait behind it: move
+  checkpoint hashing off the order-critical path (incremental hashing, or a copy-on-write state capture
+  hashed by a separate thread) before real orders/stops exist.
+  Acceptance tooling: `tools/c9_acceptance.py --live 60` (fresh READ-ONLY live run + live-vs-replay +
+  second replay + real-recording performance) and `tools/c9_benchmark.py`.
 
 ## 8b. Bars, metrics (C5–C8, unchanged plan)
 

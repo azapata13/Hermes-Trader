@@ -24,6 +24,7 @@ from typing import Iterable
 from hermes.market.classify import Aggressor
 from hermes.market.events import BookSide
 from hermes.market.orderbook import BookSnapshot, BookState, LevelChange
+from hermes.market.rolling import WindowSums
 from hermes.market.tape import ClassifiedTrade
 
 _S = 1_000_000_000
@@ -121,6 +122,7 @@ class StructureEngine:
     __slots__ = (
         "instrument_id", "continuity_epoch", "_available", "_reason", "_now_ns",
         "_levels", "_liq_events", "_hit_events", "_recent_hits", "_link_ns",
+        "_r_liq", "_r_hit",               # C9f derived caches (NOT part of fingerprint_state)
     )
 
     def __init__(self, instrument_id: int, *, replenish_link_ms: int = 250) -> None:
@@ -136,6 +138,9 @@ class StructureEngine:
         self._hit_events: deque[_HitEvent] = deque()
         self._recent_hits: deque[_Hit] = deque()
         self._link_ns = replenish_link_ms * 1_000_000
+        # (added_bid, removed_bid, added_ask, removed_ask, repl_bid, repl_ask, repl_ev_bid, repl_ev_ask, edge)
+        self._r_liq = WindowSums(tuple(w * _S for w in WINDOWS_S), 9)
+        self._r_hit = WindowSums(tuple(w * _S for w in WINDOWS_S), 2)     # (known_buy_at_ask, known_sell_at_bid)
 
     # ---------------------------------------------------------------- book
     def observe_book(
@@ -177,6 +182,7 @@ class StructureEngine:
 
         if ch.at_window_edge:
             self._liq_events.append((now_ns, ch.side, 0, 0, 0, 0, 1))
+            self._r_liq.push(now_ns, (0, 0, 0, 0, 0, 0, 0, 0, 1), self._now_ns)
             return
 
         added = max(0, ch.new_size - ch.old_size)
@@ -191,6 +197,9 @@ class StructureEngine:
         self._liq_events.append(
             (now_ns, ch.side, added, removed, replenished, replenish_event, 0)
         )
+        vals = ((added, removed, 0, 0, replenished, 0, replenish_event, 0, 0) if ch.side is BookSide.BID else
+                (0, 0, added, removed, 0, replenished, 0, replenish_event, 0))
+        self._r_liq.push(now_ns, vals, self._now_ns)
 
         if level is not None:
             level.visible_additions += added
@@ -257,6 +266,9 @@ class StructureEngine:
 
         self._recent_hits.append(_Hit(now_ns, side, best, trade.size))
         self._hit_events.append((now_ns, trade.aggressor, trade.size))
+        hv = ((trade.size, 0) if trade.aggressor is Aggressor.BUY else
+              (0, trade.size) if trade.aggressor is Aggressor.SELL else (0, 0))
+        self._r_hit.push(now_ns, hv, self._now_ns)
         self._evict()
 
     def _match_recent_hit(
@@ -299,6 +311,8 @@ class StructureEngine:
         self._liq_events.clear()
         self._hit_events.clear()
         self._recent_hits.clear()
+        self._r_liq.clear()
+        self._r_hit.clear()
 
     def _advance_clock(self, now_ns: int) -> None:
         if now_ns > self._now_ns:
@@ -352,8 +366,31 @@ class StructureEngine:
             seconds, ab, rb, aa, ra, repb, repa, reb, rea, buy, sell, edge
         )
 
+    def _window_fast(self, i: int, seconds: int) -> StructureWindow:
+        """C9f: exact rolling sums; falls back to the original rescan if the cache is inexact."""
+        liq = self._r_liq.sums_at(i, self._now_ns)
+        hit = self._r_hit.sums_at(i, self._now_ns)
+        if liq is None or hit is None:
+            return self._window(seconds)
+        ab, rb, aa, ra, repb, repa, reb, rea, edge = liq
+        return StructureWindow(seconds, ab, rb, aa, ra, repb, repa, reb, rea, hit[0], hit[1], edge)
+
+    def snapshot_reference(self) -> StructureSnapshot:
+        """The original full-rescan snapshot (equivalence tests / benchmarks only)."""
+        return StructureSnapshot(self.continuity_epoch, self._available, self._reason, self._current_levels(),
+                                 tuple(self._window(w) for w in WINDOWS_S))
+
     def snapshot(self) -> StructureSnapshot:
-        levels = tuple(
+        return StructureSnapshot(
+            continuity_epoch=self.continuity_epoch,
+            available=self._available,
+            reason=self._reason,
+            current_levels=self._current_levels(),
+            windows=tuple(self._window_fast(i, w) for i, w in enumerate(WINDOWS_S)),
+        )
+
+    def _current_levels(self) -> tuple[LevelPersistence, ...]:
+        return tuple(
             LevelPersistence(
                 side=l.side,
                 price_units=l.price_units,
@@ -369,13 +406,6 @@ class StructureEngine:
                 self._levels.values(),
                 key=lambda x: (x.side.value, -x.price_units if x.side is BookSide.BID else x.price_units),
             )
-        )
-        return StructureSnapshot(
-            continuity_epoch=self.continuity_epoch,
-            available=self._available,
-            reason=self._reason,
-            current_levels=levels,
-            windows=tuple(self._window(w) for w in WINDOWS_S),
         )
 
     def token(self) -> tuple:
