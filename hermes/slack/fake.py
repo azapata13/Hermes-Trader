@@ -28,6 +28,7 @@ class FakeSlackTransport:
         self.fail_updates = fail_updates
         self.posts: list[tuple[SlackMessageRef, SlackMessage]] = []
         self.updates: list[tuple[SlackMessageRef, SlackMessage]] = []
+        self.uploads: list[tuple[SlackMessageRef, str, str, str]] = []
         self._handler: InteractionHandler | None = None
         self._lock = Lock()
         self.started = False
@@ -60,6 +61,17 @@ class FakeSlackTransport:
                 self.fail_updates -= 1
                 raise RuntimeError("injected Slack update failure")
             self.updates.append((ref, message))
+
+    def upload_file(
+        self,
+        ref: SlackMessageRef,
+        path: str,
+        *,
+        title: str,
+        initial_comment: str,
+    ) -> None:
+        with self._lock:
+            self.uploads.append((ref, path, title, initial_comment))
 
     def emit(self, interaction: SlackInteraction) -> None:
         if self._handler is None:

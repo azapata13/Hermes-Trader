@@ -27,6 +27,7 @@ from hermes.decision.response import (
 )
 from hermes.decision.runtime import JournalKind, JournalRecord
 from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
+from hermes.slack.enrichment import VisualEnrichmentWorker
 from hermes.slack.protocol import (
     SlackAction,
     SlackInteraction,
@@ -137,6 +138,7 @@ class SlackApprovalBridge:
         self.cfg = cfg
         self.transport = transport
         self.journal = journal or ApprovalJournal()
+        self.enrichment = VisualEnrichmentWorker(transport)
         self.max_interactions_per_event = max_interactions_per_event
 
         self.stats = SlackBridgeStats()
@@ -158,6 +160,7 @@ class SlackApprovalBridge:
             return
         self._started = True
         self.journal.start()
+        self.enrichment.start()
         self._worker = Thread(target=self._run_outbox, name="hermes-slack-outbox", daemon=True)
         self._worker.start()
         try:
@@ -181,6 +184,7 @@ class SlackApprovalBridge:
             self._worker.join(timeout)
             if self._worker.is_alive():
                 log.warning("Slack outbox worker did not stop within %.1fs", timeout)
+        self.enrichment.close()
         self.journal.close(timeout)
         self._worker = None
         self._started = False
@@ -400,6 +404,10 @@ class SlackApprovalBridge:
                 self._message_refs[p.proposal_id] = new_ref
                 self._displayed[p.proposal_id] = p
             self.stats.posts += 1
+
+            if p.status == "ACTIONABLE" and p.approval_allowed_now:
+                self.enrichment.submit(p, new_ref)
+
             return
         try:
             self.transport.update(ref, msg)
@@ -429,6 +437,7 @@ class SlackApprovalBridge:
                 "journal_write_errors": self.journal.write_errors,
                 "journal_dropped": self.journal.dropped,
                 "human_closed": len(self._human_closed),
+                "visual_enrichment": self.enrichment.summary(),
             }
         )
         return out

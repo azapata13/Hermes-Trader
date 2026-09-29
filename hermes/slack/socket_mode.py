@@ -175,6 +175,23 @@ class SlackSocketModeTransport:
             blocks=list(message.blocks),
         )
 
+    def upload_file(
+        self,
+        ref: SlackMessageRef,
+        path: str,
+        *,
+        title: str,
+        initial_comment: str,
+    ) -> None:
+        app = self._require_app()
+        app.client.files_upload_v2(
+            channel=ref.channel_id,
+            thread_ts=ref.ts,
+            file=path,
+            title=title,
+            initial_comment=initial_comment,
+        )
+
     def _require_app(self):
         if self._app is None:
             raise RuntimeError("Slack Socket Mode transport is not started")
