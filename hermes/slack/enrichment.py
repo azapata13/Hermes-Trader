@@ -20,6 +20,11 @@ def _enabled(name: str, default: str = "0") -> bool:
 
 
 def _find_tws_window_id() -> int:
+    configured = os.getenv("HERMES_TWS_WINDOW_ID", "").strip()
+
+    if configured:
+        return int(configured)
+
     swift = r"""
 import Foundation
 import CoreGraphics
