@@ -132,6 +132,7 @@ class SlackApprovalBridge:
         journal: ApprovalJournal | None = None,
         *,
         market_context_provider=None,
+        status_provider=None,
         max_outbox: int = 256,
         max_interactions_per_event: int = 16,
     ) -> None:
@@ -148,6 +149,7 @@ class SlackApprovalBridge:
         self.chat = ConversationalWorker(
             transport,
             market_context_provider,
+            status_provider=status_provider,
         )
 
         if hasattr(transport, "set_mention_handler"):

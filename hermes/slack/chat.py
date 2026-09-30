@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
@@ -26,6 +27,22 @@ class SlackMention:
     thread_ts: str
 
 
+def _command_text(text: str) -> str:
+    text = re.sub(r"<@[A-Z0-9]+>", "", text)
+    return " ".join(text.strip().lower().split())
+
+
+def _is_status_command(text: str) -> bool:
+    return _command_text(text) in {
+        "status",
+        "statut",
+        "état",
+        "etat",
+        "status hermes",
+        "statut hermes",
+    }
+
+
 def _use_sol(question: str) -> bool:
     q = question.lower()
     terms = (
@@ -41,10 +58,12 @@ class ConversationalWorker:
         self,
         transport,
         context_provider: Callable[[], str],
+        status_provider: Callable[[], str] | None = None,
         max_queue: int = 16,
     ) -> None:
         self.transport = transport
         self.context_provider = context_provider
+        self.status_provider = status_provider
 
         self._queue: Queue[object] = Queue(maxsize=max_queue)
         self._thread: Thread | None = None
@@ -178,6 +197,29 @@ class ConversationalWorker:
         screenshot_status = "unavailable"
 
         try:
+            if _is_status_command(mention.text):
+                if self.status_provider is None:
+                    answer = "⚠️ Hermès status provider unavailable."
+                else:
+                    answer = self.status_provider()
+
+                self.transport.reply_text(
+                    mention.channel_id,
+                    mention.thread_ts,
+                    answer,
+                )
+
+                self._write_journal(
+                    mention,
+                    model="local-status",
+                    answer=answer,
+                    screenshot_status="not_requested",
+                    status="completed",
+                )
+
+                self.completed += 1
+                return
+
             self.transport.reply_text(
                 mention.channel_id,
                 mention.thread_ts,

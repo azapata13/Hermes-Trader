@@ -167,6 +167,7 @@ class LiveRuntime:
                         SlackSocketModeTransport(slack_settings),
                         ApprovalJournal(journal_path),
                         market_context_provider=self._slack_market_context,
+                        status_provider=self._slack_status,
                     )
                     # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
                     # AFTER DecisionRuntime has applied the current market event.
@@ -285,6 +286,100 @@ class LiveRuntime:
         if n > self._violations_reported:
             self._violations_reported = n
             self.pipeline.post_local(R.RawControl, kind="readonly_violation", detail=c.readonly_violations[-1])
+
+    def _slack_status(self) -> str:
+        """Fast deterministic Slack status. No OpenAI and no screenshot."""
+        snap = self.publisher.latest()
+
+        if snap is None:
+            return (
+                "🔴 *Hermès STATUS*\n"
+                "Market snapshot: UNAVAILABLE\n"
+                "Execution: DISABLED"
+            )
+
+        now = time.perf_counter_ns()
+        age_ms = max(0.0, (now - snap.mono_ns) / 1_000_000)
+
+        lines = [
+            "🟢 *Hermès STATUS*",
+            f"IBKR: {snap.connection.value.upper()}",
+            f"Snapshot age: {age_ms:.0f} ms",
+        ]
+
+        overall_ready = age_ms <= 5000
+
+        for inst in snap.instruments:
+            b = inst.bars
+
+            completed_30s = b.completed_30s if b is not None else 0
+            completed_1m = b.completed_1m if b is not None else 0
+            completed_5m = b.completed_5m if b is not None else 0
+
+            bars_ready = (
+                completed_30s >= 10
+                and completed_1m >= 5
+                and completed_5m >= 1
+            )
+
+            bbo_ready = inst.bbo is not None
+            book_ready = (
+                inst.book is not None
+                and inst.book.state.value == "valid"
+            )
+            tape_ready = (
+                inst.tape is not None
+                and inst.tape.size > 0
+            )
+
+            session_ready = False
+            if inst.session is not None:
+                st = inst.session.session
+                session_ready = bool(st is not None and st.volume)
+
+            instrument_ready = (
+                inst.market_data_ok
+                and bbo_ready
+                and book_ready
+                and tape_ready
+                and bars_ready
+                and session_ready
+            )
+
+            overall_ready = overall_ready and instrument_ready
+
+            lines += [
+                "",
+                f"Instrument: {inst.local_symbol}",
+                f"Market data: {'OK' if inst.market_data_ok else 'NOT READY'}",
+                f"BBO: {'ACTIVE' if bbo_ready else 'UNAVAILABLE'}",
+                f"DOM: {inst.book.state.value.upper() if inst.book else 'UNAVAILABLE'}",
+                f"Tape: {'ACTIVE' if tape_ready else 'EMPTY'}",
+                (
+                    "Bars: "
+                    f"30s {completed_30s}/10 · "
+                    f"1m {completed_1m}/5 · "
+                    f"5m {completed_5m}/1"
+                ),
+                f"VWAP/session: {'READY' if session_ready else 'UNAVAILABLE'}",
+            ]
+
+        if age_ms > 5000:
+            context = "STALE"
+        elif overall_ready:
+            context = "LIVE"
+        else:
+            context = "WARMING_UP"
+
+        lines += [
+            "",
+            f"Context: *{context}*",
+            "Slack: CONNECTED",
+            "Execution: *DISABLED*",
+            f"Git: `{git_commit()}`",
+        ]
+
+        return "\n".join(lines)
 
     def _slack_market_context(self) -> str:
         """Compact immutable snapshot context for conversational Slack analysis."""
