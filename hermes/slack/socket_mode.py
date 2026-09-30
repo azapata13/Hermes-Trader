@@ -20,6 +20,7 @@ import logging
 import os
 from typing import Mapping
 
+from hermes.slack.chat import SlackMention
 from hermes.slack.protocol import (
     ENTER_ACTION_ID,
     REJECT_ACTION_ID,
@@ -127,6 +128,7 @@ class SlackSocketModeTransport:
         self._app = None
         self._handler = None
         self._on_interaction: InteractionHandler | None = None
+        self._on_mention = None
 
     def start(self, on_interaction: InteractionHandler) -> None:
         from slack_bolt import App
@@ -144,6 +146,16 @@ class SlackSocketModeTransport:
         def _reject(ack, body):
             ack()
             self._handle_body(body, SlackAction.REJECT)
+
+        @app.event("app_mention")
+        def _mention(event):
+            self._handle_mention(event)
+
+        @app.event("message")
+        def _message(event):
+            # message.channels is subscribed for future conversational features.
+            # app_mention is handled separately above.
+            return
 
         handler = SocketModeHandler(app, self.settings.app_token)
         handler.connect()
@@ -191,6 +203,51 @@ class SlackSocketModeTransport:
             title=title,
             initial_comment=initial_comment,
         )
+
+    def set_mention_handler(self, handler) -> None:
+        self._on_mention = handler
+
+    def reply_text(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        text: str,
+    ) -> None:
+        app = self._require_app()
+        app.client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=text,
+        )
+
+    def _handle_mention(self, event: object) -> None:
+        if self._on_mention is None or not isinstance(event, dict):
+            return
+
+        channel = str(event.get("channel") or "")
+
+        if channel != self.channel_id:
+            return
+
+        if event.get("bot_id"):
+            return
+
+        text = str(event.get("text") or "").strip()
+        ts = str(event.get("ts") or "")
+        user_id = str(event.get("user") or "")
+
+        if not text or not ts or not user_id:
+            return
+
+        mention = SlackMention(
+            channel_id=channel,
+            user_id=user_id,
+            text=text,
+            ts=ts,
+            thread_ts=str(event.get("thread_ts") or ts),
+        )
+
+        self._on_mention(mention)
 
     def _require_app(self):
         if self._app is None:
