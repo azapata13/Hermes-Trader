@@ -294,20 +294,30 @@ class LiveRuntime:
         if snap is None:
             return (
                 "🔴 *Hermès STATUS*\n"
-                "Market snapshot: UNAVAILABLE\n"
-                "Execution: DISABLED"
+                "IBKR: UNKNOWN\n"
+                "Context: *UNAVAILABLE*\n"
+                "Execution: *DISABLED*"
             )
 
         now = time.perf_counter_ns()
         age_ms = max(0.0, (now - snap.mono_ns) / 1_000_000)
+        uptime_s = max(0.0, (now - self.started_mono) / 1_000_000_000)
 
-        lines = [
-            "🟢 *Hermès STATUS*",
-            f"IBKR: {snap.connection.value.upper()}",
-            f"Snapshot age: {age_ms:.0f} ms",
-        ]
+        missing: list[str] = []
+        instrument_lines: list[str] = []
 
-        overall_ready = age_ms <= 5000
+        connection_ok = snap.connection.value == "connected"
+
+        if not connection_ok:
+            missing.append("IBKR")
+
+        if age_ms > 5000:
+            missing.append("stale_snapshot")
+
+        if not snap.instruments:
+            missing.append("instrument_snapshot")
+
+        overall_ready = connection_ok and age_ms <= 5000 and bool(snap.instruments)
 
         for inst in snap.instruments:
             b = inst.bars
@@ -323,10 +333,12 @@ class LiveRuntime:
             )
 
             bbo_ready = inst.bbo is not None
+
             book_ready = (
                 inst.book is not None
                 and inst.book.state.value == "valid"
             )
+
             tape_ready = (
                 inst.tape is not None
                 and inst.tape.size > 0
@@ -336,6 +348,23 @@ class LiveRuntime:
             if inst.session is not None:
                 st = inst.session.session
                 session_ready = bool(st is not None and st.volume)
+
+            if not inst.market_data_ok:
+                missing.append(f"{inst.local_symbol}:market_data")
+            if not bbo_ready:
+                missing.append(f"{inst.local_symbol}:BBO")
+            if not book_ready:
+                missing.append(f"{inst.local_symbol}:DOM")
+            if not tape_ready:
+                missing.append(f"{inst.local_symbol}:tape")
+            if completed_30s < 10:
+                missing.append(f"{inst.local_symbol}:30s")
+            if completed_1m < 5:
+                missing.append(f"{inst.local_symbol}:1m")
+            if completed_5m < 1:
+                missing.append(f"{inst.local_symbol}:5m")
+            if not session_ready:
+                missing.append(f"{inst.local_symbol}:VWAP")
 
             instrument_ready = (
                 inst.market_data_ok
@@ -348,7 +377,7 @@ class LiveRuntime:
 
             overall_ready = overall_ready and instrument_ready
 
-            lines += [
+            instrument_lines += [
                 "",
                 f"Instrument: {inst.local_symbol}",
                 f"Market data: {'OK' if inst.market_data_ok else 'NOT READY'}",
@@ -364,16 +393,37 @@ class LiveRuntime:
                 f"VWAP/session: {'READY' if session_ready else 'UNAVAILABLE'}",
             ]
 
-        if age_ms > 5000:
+        if not connection_ok:
+            context = "DISCONNECTED"
+            icon = "🔴"
+        elif age_ms > 5000:
             context = "STALE"
+            icon = "🔴"
         elif overall_ready:
             context = "LIVE"
+            icon = "🟢"
         else:
             context = "WARMING_UP"
+            icon = "🟡"
+
+        lines = [
+            f"{icon} *Hermès STATUS*",
+            f"IBKR: {snap.connection.value.upper()}",
+            f"Uptime: {uptime_s:.0f} s",
+            f"Snapshot age: {age_ms:.0f} ms",
+        ]
+
+        lines.extend(instrument_lines)
 
         lines += [
             "",
             f"Context: *{context}*",
+            (
+                "Missing: "
+                + ", ".join(dict.fromkeys(missing))
+                if missing
+                else "Missing: none"
+            ),
             "Slack: CONNECTED",
             "Execution: *DISABLED*",
             f"Git: `{git_commit()}`",
