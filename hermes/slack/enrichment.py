@@ -19,28 +19,63 @@ def _enabled(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _capture_tws(path: Path) -> None:
-    script = '''
-tell application "System Events"
-    tell process "JavaApplicationStub"
-        set {x, y} to position of front window
-        set {w, h} to size of front window
-        return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
-    end tell
-end tell
-'''
-    coords = subprocess.check_output(
-        ["osascript", "-e", script],
+def _find_tws_window_id() -> int:
+    swift = r"""
+import Foundation
+import CoreGraphics
+
+let windows = CGWindowListCopyWindowInfo(
+    [.optionOnScreenOnly, .excludeDesktopElements],
+    kCGNullWindowID
+) as! [[String: Any]]
+
+for w in windows {
+    let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+    let title = w[kCGWindowName as String] as? String ?? ""
+    let id = w[kCGWindowNumber as String] as? Int ?? 0
+    let layer = w[kCGWindowLayer as String] as? Int ?? -1
+
+    let text = (owner + " " + title).lowercased()
+
+    if layer == 0 &&
+       (text.contains("trader workstation") ||
+        text.contains("interactive brokers")) {
+        print(id)
+        exit(0)
+    }
+}
+
+exit(2)
+"""
+
+    result = subprocess.run(
+        ["/usr/bin/swift", "-"],
+        input=swift,
         text=True,
-        timeout=5,
-    ).strip()
+        capture_output=True,
+        timeout=15,
+    )
 
-    x, y, w, h = [int(v.strip()) for v in coords.split(",")]
+    if result.returncode != 0:
+        raise RuntimeError(
+            "could not find Trader Workstation window: "
+            + (result.stderr.strip() or "no matching window")
+        )
 
+    return int(result.stdout.strip().splitlines()[0])
+
+
+def _capture_tws(path: Path) -> None:
+    window_id = _find_tws_window_id()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(
-        ["screencapture", "-x", f"-R{x},{y},{w},{h}", str(path)],
+        [
+            "/usr/sbin/screencapture",
+            "-x",
+            f"-l{window_id}",
+            str(path),
+        ],
         check=True,
         timeout=10,
     )
