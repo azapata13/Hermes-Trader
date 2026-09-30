@@ -296,9 +296,69 @@ class LiveRuntime:
         now_mono_ns = time.perf_counter_ns()
         snapshot_age_ms = max(0.0, (now_mono_ns - snap.mono_ns) / 1_000_000)
 
+        warmup_elapsed_s = max(
+            0.0,
+            (now_mono_ns - self.started_mono) / 1_000_000_000,
+        )
+
+        readiness_reasons: list[str] = []
+
+        if not snap.instruments:
+            readiness_reasons.append("no_instrument_snapshot")
+        else:
+            for inst in snap.instruments:
+                if not inst.market_data_ok:
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:market_data_not_ok"
+                    )
+
+                if inst.bbo is None:
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:bbo_unavailable"
+                    )
+
+                if inst.book is None or inst.book.state.value != "valid":
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:book_not_valid"
+                    )
+
+                if inst.tape is None or inst.tape.size == 0:
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:tape_empty"
+                    )
+
+                if inst.bars is None:
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:bars_unavailable"
+                    )
+                else:
+                    if inst.bars.completed_30s < 10:
+                        readiness_reasons.append(
+                            f"{inst.local_symbol}:need_30s_10_have_{inst.bars.completed_30s}"
+                        )
+                    if inst.bars.completed_1m < 5:
+                        readiness_reasons.append(
+                            f"{inst.local_symbol}:need_1m_5_have_{inst.bars.completed_1m}"
+                        )
+                    if inst.bars.completed_5m < 1:
+                        readiness_reasons.append(
+                            f"{inst.local_symbol}:need_5m_1_have_{inst.bars.completed_5m}"
+                        )
+
+                if inst.session is None:
+                    readiness_reasons.append(
+                        f"{inst.local_symbol}:session_unavailable"
+                    )
+                else:
+                    st = inst.session.session
+                    if st is None or not st.volume:
+                        readiness_reasons.append(
+                            f"{inst.local_symbol}:session_vwap_unavailable"
+                        )
+
         if snapshot_age_ms > 5000:
             context_status = "STALE"
-        elif not snap.instruments or not any(i.market_data_ok for i in snap.instruments):
+        elif readiness_reasons:
             context_status = "WARMING_UP"
         else:
             context_status = "LIVE"
@@ -307,6 +367,9 @@ class LiveRuntime:
             "CONTEXT_FRESHNESS:",
             f"context_status={context_status}",
             f"snapshot_age_ms={snapshot_age_ms:.1f}",
+            f"warmup_elapsed_s={warmup_elapsed_s:.1f}",
+            f"readiness_ready={not readiness_reasons}",
+            f"readiness_reasons={readiness_reasons}",
             f"seq={snap.seq}",
             f"connection={snap.connection.value}",
             f"farm_broken={snap.farm_broken}",
@@ -425,10 +488,18 @@ class LiveRuntime:
             if inst.bars is not None:
                 b = inst.bars
 
+                bars_ready = (
+                    b.completed_30s >= 10
+                    and b.completed_1m >= 5
+                    and b.completed_5m >= 1
+                )
+
                 lines += [
-                    f"completed_30s={b.completed_30s}",
-                    f"completed_1m={b.completed_1m}",
-                    f"completed_5m={b.completed_5m}",
+                    "WARMUP_PROGRESS:",
+                    f"bars_ready={bars_ready}",
+                    f"completed_30s={b.completed_30s}/10",
+                    f"completed_1m={b.completed_1m}/5",
+                    f"completed_5m={b.completed_5m}/1",
                     bar_line("forming_30s", b.forming_30s, grid),
                     bar_line("forming_1m", b.forming_1m, grid),
                     bar_line("forming_5m", b.forming_5m, grid),
