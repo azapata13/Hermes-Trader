@@ -166,6 +166,7 @@ class LiveRuntime:
                         cfg.decision,
                         SlackSocketModeTransport(slack_settings),
                         ApprovalJournal(journal_path),
+                        market_context_provider=self._slack_market_context,
                     )
                     # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
                     # AFTER DecisionRuntime has applied the current market event.
@@ -284,6 +285,158 @@ class LiveRuntime:
         if n > self._violations_reported:
             self._violations_reported = n
             self.pipeline.post_local(R.RawControl, kind="readonly_violation", detail=c.readonly_violations[-1])
+
+    def _slack_market_context(self) -> str:
+        """Compact immutable snapshot context for conversational Slack analysis."""
+        snap = self.publisher.latest()
+
+        if snap is None:
+            return "No MarketSnapshot has been published yet."
+
+        lines = [
+            f"seq={snap.seq}",
+            f"connection={snap.connection.value}",
+            f"farm_broken={snap.farm_broken}",
+            f"not_live={snap.not_live}",
+            f"alerts={list(snap.alerts)}",
+        ]
+
+        def bar_line(label, b, grid):
+            if b is None:
+                return f"{label}=UNAVAILABLE"
+
+            return (
+                f"{label}="
+                f"O:{_fmt_price(b.open, grid)} "
+                f"H:{_fmt_price(b.high, grid)} "
+                f"L:{_fmt_price(b.low, grid)} "
+                f"C:{_fmt_price(b.close, grid)} "
+                f"volume:{b.volume} "
+                f"trades:{b.trades} "
+                f"buy:{b.buy_volume} "
+                f"sell:{b.sell_volume} "
+                f"unknown:{b.unknown_volume} "
+                f"delta:{b.known_delta} "
+                f"flags:{b.flags.name if b.flags else 'NONE'}"
+            )
+
+        for inst in snap.instruments:
+            state = self.engine.instruments.get(inst.instrument_id)
+            grid = state.grid if state is not None else None
+
+            lines += [
+                "",
+                f"instrument={inst.local_symbol}",
+                f"con_id={inst.con_id}",
+                f"contract_state={inst.contract_state}",
+                f"market_data_ok={inst.market_data_ok}",
+                f"not_ok_reasons={list(inst.not_ok_reasons)}",
+                f"market_data_type={inst.market_data_type}",
+            ]
+
+            if inst.bbo is not None:
+                lines += [
+                    f"bbo_bid={_fmt_price(inst.bbo.bid_units, grid)} size={inst.bbo.bid_size}",
+                    f"bbo_ask={_fmt_price(inst.bbo.ask_units, grid)} size={inst.bbo.ask_size}",
+                ]
+            else:
+                lines.append("bbo=UNAVAILABLE")
+
+            if inst.last_trade is not None:
+                lines.append(
+                    f"last_trade={_fmt_price(inst.last_trade.price_units, grid)} "
+                    f"size={inst.last_trade.size}"
+                )
+
+            if inst.book is not None:
+                lines += [
+                    f"book_state={inst.book.state.value}",
+                    f"book_bid_levels={len(inst.book.bids)}",
+                    f"book_ask_levels={len(inst.book.asks)}",
+                ]
+
+                if inst.book.bids:
+                    lines.append(
+                        "top_book_bids="
+                        + str([
+                            (_fmt_price(px, grid), size)
+                            for px, size in inst.book.bids[:10]
+                        ])
+                    )
+
+                if inst.book.asks:
+                    lines.append(
+                        "top_book_asks="
+                        + str([
+                            (_fmt_price(px, grid), size)
+                            for px, size in inst.book.asks[:10]
+                        ])
+                    )
+
+            if inst.tape is not None:
+                t = inst.tape.retained_window
+
+                lines += [
+                    f"tape_buy_volume={t.buy_volume}",
+                    f"tape_sell_volume={t.sell_volume}",
+                    f"tape_unknown_volume={t.unknown_volume}",
+                    f"tape_known_delta={t.known_delta}",
+                    f"last_aggressor="
+                    f"{inst.tape.last_aggressor.value if inst.tape.last_aggressor else None}",
+                ]
+
+            if inst.session is not None:
+                ss = inst.session
+                st = ss.session
+
+                lines += [
+                    f"in_session={ss.in_trading_session}",
+                    f"in_rth={ss.in_rth}",
+                    f"trading_date={ss.trading_date}",
+                    f"observed_from_open={ss.observed_from_open}",
+                    f"session_gap_observed={ss.gap_observed}",
+                ]
+
+                if st is not None and st.volume:
+                    vwap_units = round(st.vwap_num / st.volume)
+
+                    lines += [
+                        f"session_vwap={_fmt_price(vwap_units, grid)}",
+                        f"session_high={_fmt_price(st.high, grid)}",
+                        f"session_low={_fmt_price(st.low, grid)}",
+                        f"session_volume={st.volume}",
+                    ]
+                else:
+                    lines.append("session_vwap=UNAVAILABLE")
+
+            if inst.bars is not None:
+                b = inst.bars
+
+                lines += [
+                    f"completed_30s={b.completed_30s}",
+                    f"completed_1m={b.completed_1m}",
+                    f"completed_5m={b.completed_5m}",
+                    bar_line("forming_30s", b.forming_30s, grid),
+                    bar_line("forming_1m", b.forming_1m, grid),
+                    bar_line("forming_5m", b.forming_5m, grid),
+                    bar_line(
+                        "latest_completed_30s",
+                        b.latest_30s[0] if b.latest_30s else None,
+                        grid,
+                    ),
+                    bar_line(
+                        "latest_completed_1m",
+                        b.latest_1m[0] if b.latest_1m else None,
+                        grid,
+                    ),
+                    bar_line(
+                        "latest_completed_5m",
+                        b.latest_5m[0] if b.latest_5m else None,
+                        grid,
+                    ),
+                ]
+
+        return "\\n".join(lines)
 
     # ------------------------------------------------------------------ reporting
     def build_report(self) -> dict[str, Any]:
