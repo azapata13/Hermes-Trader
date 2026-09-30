@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
 import logging
 import os
 from pathlib import Path
 from queue import Full, Queue
-from threading import Thread
+from threading import Lock, Thread
 from typing import Callable
 
 from hermes.slack.enrichment import _capture_tws, _image_url
 
 log = logging.getLogger("hermes.slack.chat")
-
 _STOP = object()
 
 
@@ -26,27 +28,11 @@ class SlackMention:
 
 def _use_sol(question: str) -> bool:
     q = question.lower()
-
     terms = (
-        "setup",
-        "dom",
-        "order flow",
-        "orderflow",
-        "time & sales",
-        "tape",
-        "structure",
-        "risque",
-        "risk",
-        "régime",
-        "regime",
-        "compare",
-        "pourquoi",
-        "confirmation",
-        "entrée",
-        "entry",
-        "stop",
+        "setup", "dom", "order flow", "orderflow", "time & sales",
+        "tape", "structure", "risque", "risk", "régime", "regime",
+        "compare", "pourquoi", "confirmation", "entrée", "entry", "stop",
     )
-
     return len(question) > 180 or any(t in q for t in terms)
 
 
@@ -68,10 +54,24 @@ class ConversationalWorker:
         self.failures = 0
         self.dropped = 0
         self.capture_failures = 0
+        self.duplicates = 0
+
+        self._seen_lock = Lock()
+        self._seen_order: deque[str] = deque(maxlen=512)
+        self._seen_set: set[str] = set()
+
+        self._journal = Path(
+            os.getenv(
+                "HERMES_SLACK_CHAT_JOURNAL",
+                "~/hermes-data/logs/slack_chat.jsonl",
+            )
+        ).expanduser()
 
     def start(self) -> None:
         if self._thread is not None:
             return
+
+        self._journal.parent.mkdir(parents=True, exist_ok=True)
 
         self._thread = Thread(
             target=self._run,
@@ -92,8 +92,29 @@ class ConversationalWorker:
         self._thread.join(timeout=3)
         self._thread = None
 
+    def _new_message(self, mention: SlackMention) -> bool:
+        key = f"{mention.channel_id}:{mention.ts}"
+
+        with self._seen_lock:
+            if key in self._seen_set:
+                return False
+
+            if len(self._seen_order) == self._seen_order.maxlen:
+                oldest = self._seen_order.popleft()
+                self._seen_set.discard(oldest)
+
+            self._seen_order.append(key)
+            self._seen_set.add(key)
+
+        return True
+
     def submit(self, mention: SlackMention) -> None:
         self.received += 1
+
+        if not self._new_message(mention):
+            self.duplicates += 1
+            log.info("duplicate Slack mention ignored ts=%s", mention.ts)
+            return
 
         try:
             self._queue.put_nowait(mention)
@@ -106,8 +127,37 @@ class ConversationalWorker:
             "completed": self.completed,
             "failures": self.failures,
             "dropped": self.dropped,
+            "duplicates": self.duplicates,
             "capture_failures": self.capture_failures,
         }
+
+    def _write_journal(
+        self,
+        mention: SlackMention,
+        *,
+        model: str,
+        answer: str,
+        screenshot_status: str,
+        status: str,
+    ) -> None:
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "channel_id": mention.channel_id,
+            "user_id": mention.user_id,
+            "message_ts": mention.ts,
+            "thread_ts": mention.thread_ts,
+            "question": mention.text,
+            "model": model,
+            "screenshot_status": screenshot_status,
+            "answer": answer,
+        }
+
+        try:
+            with self._journal.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            log.warning("could not write Slack conversation journal: %s", exc)
 
     def _run(self) -> None:
         while True:
@@ -124,6 +174,9 @@ class ConversationalWorker:
                 self._queue.task_done()
 
     def _process(self, mention: SlackMention) -> None:
+        model = "unknown"
+        screenshot_status = "unavailable"
+
         try:
             self.transport.reply_text(
                 mention.channel_id,
@@ -134,7 +187,6 @@ class ConversationalWorker:
             context = self.context_provider()
 
             screenshot = None
-            screenshot_status = "unavailable"
 
             try:
                 directory = Path(
@@ -145,7 +197,6 @@ class ConversationalWorker:
                 ).expanduser()
 
                 screenshot = directory / "conversation-current.png"
-
                 _capture_tws(screenshot)
 
                 if screenshot.exists() and screenshot.stat().st_size > 0:
@@ -165,20 +216,12 @@ class ConversationalWorker:
 
             from openai import OpenAI
 
-            client = OpenAI(
-                api_key=os.environ["OPENAI_API_KEY"]
-            )
+            client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
             model = (
-                os.getenv(
-                    "HERMES_SOL_MODEL",
-                    "gpt-5.6-sol",
-                )
+                os.getenv("HERMES_SOL_MODEL", "gpt-5.6-sol")
                 if _use_sol(mention.text)
-                else os.getenv(
-                    "HERMES_LUNA_MODEL",
-                    "gpt-5.6-luna",
-                )
+                else os.getenv("HERMES_LUNA_MODEL", "gpt-5.6-luna")
             )
 
             prompt = f"""
@@ -186,19 +229,19 @@ You are Hermès Trader conversational analyst.
 
 You have NO execution authority.
 
-Use the deterministic Hermès market context below as the primary source.
+Use deterministic Hermès context as the primary factual source.
+The screenshot is secondary visual evidence.
 
-The TWS screenshot is optional.
-If it is unavailable, analyze only the internal Hermès data and do NOT complain
-that you cannot see the screen.
-
-Important:
-- IBKR depth is Market-By-Price, not Market-By-Order.
-- Never infer trader identity or hidden individual orders.
-- Never invent unavailable information.
-- Never invent a win rate or probability.
-- Answer in concise natural French.
+CRITICAL DATA-QUALITY RULES:
+- Read CONTEXT_FRESHNESS before interpreting market conditions.
+- If context_status=STALE, explicitly state that the market context is stale.
+- Do not describe stale observations as current.
+- If context_status=WARMING_UP, say that the session context is incomplete.
+- Never fabricate missing bars, VWAP, tape, BBO, DOM, probabilities or win rates.
+- IBKR depth is Market-By-Price, never Market-By-Order.
+- Never infer individual trader identity or hidden individual orders.
 - Distinguish observed facts from interpretation.
+- Respond in concise natural French.
 - Do not issue or execute an order.
 
 SCREENSHOT STATUS:
@@ -210,19 +253,19 @@ CURRENT HERMÈS MARKET CONTEXT:
 USER QUESTION:
 {mention.text}
 
-Answer the user's question directly.
-
 When relevant cover:
 - 5m regime
 - 1m setup
 - 30s trigger
+- VWAP / session
 - BBO
 - DOM / MBP
 - tape / aggressor flow
-- VWAP / session context
-- evidence supporting the setup
-- evidence contradicting it
-- what remains uncertain
+- supporting evidence
+- contradictory evidence
+- uncertainty
+
+Answer the question directly.
 """
 
             content = [{
@@ -253,6 +296,14 @@ When relevant cover:
                 f"🧠 *Hermès* · `{model}`\n{answer}",
             )
 
+            self._write_journal(
+                mention,
+                model=model,
+                answer=answer,
+                screenshot_status=screenshot_status,
+                status="completed",
+            )
+
             self.completed += 1
 
         except Exception as exc:
@@ -261,6 +312,14 @@ When relevant cover:
             log.exception(
                 "Hermès conversational response failed: %s",
                 exc,
+            )
+
+            self._write_journal(
+                mention,
+                model=model,
+                answer=f"{type(exc).__name__}: {exc}",
+                screenshot_status=screenshot_status,
+                status="failed",
             )
 
             try:

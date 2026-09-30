@@ -293,7 +293,20 @@ class LiveRuntime:
         if snap is None:
             return "No MarketSnapshot has been published yet."
 
+        now_mono_ns = time.perf_counter_ns()
+        snapshot_age_ms = max(0.0, (now_mono_ns - snap.mono_ns) / 1_000_000)
+
+        if snapshot_age_ms > 5000:
+            context_status = "STALE"
+        elif not snap.instruments or not any(i.market_data_ok for i in snap.instruments):
+            context_status = "WARMING_UP"
+        else:
+            context_status = "LIVE"
+
         lines = [
+            "CONTEXT_FRESHNESS:",
+            f"context_status={context_status}",
+            f"snapshot_age_ms={snapshot_age_ms:.1f}",
             f"seq={snap.seq}",
             f"connection={snap.connection.value}",
             f"farm_broken={snap.farm_broken}",
