@@ -28,6 +28,7 @@ from hermes.decision.response import (
 from hermes.decision.runtime import JournalKind, JournalRecord
 from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
 from hermes.slack.enrichment import VisualEnrichmentWorker
+from hermes.slack.chat import ConversationalWorker
 from hermes.slack.protocol import (
     SlackAction,
     SlackInteraction,
@@ -130,6 +131,7 @@ class SlackApprovalBridge:
         transport: SlackTransport,
         journal: ApprovalJournal | None = None,
         *,
+        market_context_provider=None,
         max_outbox: int = 256,
         max_interactions_per_event: int = 16,
     ) -> None:
@@ -139,6 +141,17 @@ class SlackApprovalBridge:
         self.transport = transport
         self.journal = journal or ApprovalJournal()
         self.enrichment = VisualEnrichmentWorker(transport)
+
+        if market_context_provider is None:
+            market_context_provider = lambda: "Hermès market context unavailable."
+
+        self.chat = ConversationalWorker(
+            transport,
+            market_context_provider,
+        )
+
+        if hasattr(transport, "set_mention_handler"):
+            transport.set_mention_handler(self.chat.submit)
         self.max_interactions_per_event = max_interactions_per_event
 
         self.stats = SlackBridgeStats()
@@ -161,6 +174,7 @@ class SlackApprovalBridge:
         self._started = True
         self.journal.start()
         self.enrichment.start()
+        self.chat.start()
         self._worker = Thread(target=self._run_outbox, name="hermes-slack-outbox", daemon=True)
         self._worker.start()
         try:
@@ -184,6 +198,7 @@ class SlackApprovalBridge:
             self._worker.join(timeout)
             if self._worker.is_alive():
                 log.warning("Slack outbox worker did not stop within %.1fs", timeout)
+        self.chat.close()
         self.enrichment.close()
         self.journal.close(timeout)
         self._worker = None
@@ -438,6 +453,7 @@ class SlackApprovalBridge:
                 "journal_dropped": self.journal.dropped,
                 "human_closed": len(self._human_closed),
                 "visual_enrichment": self.enrichment.summary(),
+                "conversation": self.chat.summary(),
             }
         )
         return out
