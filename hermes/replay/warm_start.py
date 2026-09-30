@@ -178,32 +178,41 @@ def warm_start_engine(
     raw_count = 0
     normalized_count = 0
 
-    for raw in RecordingSource(session_dir).events():
-        if cutoff_seq is not None and raw.seq >= cutoff_seq:
-            break
+    # Warm start runs before the live pipeline has acquired its dispatch-thread
+    # ownership. Temporarily suspend the live single-writer guard for this
+    # synchronous bootstrap replay, then restore it unconditionally.
+    owner_guard = getattr(engine, "_owner_guard", None)
+    engine.set_owner_guard(None)
 
-        if first_old_mono is None:
-            first_old_mono = raw.recv_mono_ns
+    try:
+        for raw in RecordingSource(session_dir).events():
+            if cutoff_seq is not None and raw.seq >= cutoff_seq:
+                break
 
-        rebased_mono = (
-            base_new_mono
-            + (raw.recv_mono_ns - first_old_mono)
-        )
+            if first_old_mono is None:
+                first_old_mono = raw.recv_mono_ns
 
-        # Preserve wall/exchange timestamps. Only monotonic time is rebased,
-        # because the new OS process has a different monotonic clock origin.
-        replay_raw = dataclasses.replace(
-            raw,
-            recv_mono_ns=rebased_mono,
-        )
+            rebased_mono = (
+                base_new_mono
+                + (raw.recv_mono_ns - first_old_mono)
+            )
 
-        events = normalizer.normalize(replay_raw)
+            # Preserve wall/exchange timestamps. Only monotonic time is rebased,
+            # because the new OS process has a different monotonic clock origin.
+            replay_raw = dataclasses.replace(
+                raw,
+                recv_mono_ns=rebased_mono,
+            )
 
-        for ev in events:
-            engine.on_event(ev)
+            events = normalizer.normalize(replay_raw)
 
-        raw_count += 1
-        normalized_count += len(events)
+            for ev in events:
+                engine.on_event(ev)
+
+            raw_count += 1
+            normalized_count += len(events)
+    finally:
+        engine.set_owner_guard(owner_guard)
 
     snap = engine.snapshot()
     inst = snap.instruments[0] if snap.instruments else None
