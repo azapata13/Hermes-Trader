@@ -42,6 +42,7 @@ from hermes.market.engine import MarketEngine
 from hermes.market.snapshot import MarketSnapshot, SnapshotPublisher
 from hermes.replay import fingerprint as fp
 from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
+from hermes.replay.warm_start import WarmStartResult, warm_start_engine
 from hermes.replay.decisions import DECISIONS_SIDECAR, decision_meta, save_decisions
 from hermes.storage.reader import verify_session
 from hermes.storage.recorder import Recorder
@@ -179,9 +180,11 @@ class LiveRuntime:
         self.heartbeat = Heartbeat(self.gateway, cfg.ibkr.heartbeat_interval_ms, on_beat=self._on_beat)
         self.reporter = Reporter(self.build_report, cfg.telemetry.report_interval_s, console=self.console_line)
         self.verification = None
+        self.warm_start_result: WarmStartResult | None = None
 
     # ------------------------------------------------------------------ lifecycle
     def run(self, duration_s: float | None = None, install_signals: bool = True) -> dict[str, Any]:
+        self._warm_start()
         self.start_recording()
         if self.slack_bridge is not None:
             self.slack_bridge.start()
@@ -195,6 +198,45 @@ class LiveRuntime:
             self.heartbeat.stop()
             self.finish()
         return self.summary()
+
+    def _warm_start(self) -> None:
+        try:
+            self.warm_start_result = warm_start_engine(
+                self.engine,
+                self.cfg.recorder.directory,
+                expected_contract_spec=dict(
+                    spec_from_config(self.cfg).to_params()
+                ),
+            )
+
+            result = self.warm_start_result
+
+            if result.used:
+                log.info(
+                    "WARM START | applied | age=%.1fs | raw=%d normalized=%d "
+                    "| %s conId=%s | 30s=%d 1m=%d 5m=%d | tape=%d | "
+                    "volume=%d | VWAP=%s",
+                    result.age_s or 0,
+                    result.raw_events,
+                    result.normalized_events,
+                    result.local_symbol,
+                    result.con_id,
+                    result.bars_30s,
+                    result.bars_1m,
+                    result.bars_5m,
+                    result.tape_size,
+                    result.session_volume,
+                    result.session_vwap,
+                )
+            else:
+                log.info(
+                    "WARM START | skipped | reason=%s",
+                    result.reason,
+                )
+        except Exception:
+            log.exception(
+                "WARM START failed; continuing with cold live startup"
+            )
 
     def start_recording(self) -> None:
         if self.recorder is not None:
