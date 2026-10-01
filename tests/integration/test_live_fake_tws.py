@@ -357,3 +357,31 @@ def test_warm_started_session_without_its_source_is_not_called_a_mismatch(tws, t
     assert r.live_compare is None
     assert "warm-start source" in r.live_compare_status and "not applicable" in r.live_compare_status
     assert any("warm-start source" in n for n in r.notes)
+
+
+def test_reconnect_after_warm_start_keeps_live_contract_and_recovers(tws, tmp_path, monkeypatch):
+    """D2.3 scenario D: warm start -> live contract resolved by this process -> connection drop ->
+    reconnect. The reconnect shortcut is now legitimate (this process owns the grid): no second
+    contract resolution, one new depth generation, market data healthy again, no resync storm,
+    and the whole warm-started + reconnected session still replays to its live checkpoints."""
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    Run(LiveRuntime(cfg), 2.0).join()
+    contract_before = len(tws.requests["reqContractDetails"])
+    depth_before = len(tws.requests["reqMktDepth"])
+    conns_before = tws.connections
+    rt = LiveRuntime(cfg)
+    run = Run(rt, 7.0)
+    wait_for(lambda: md_ok(rt), what="market data ok after warm start")
+    assert rt.warm_start_result.used
+    tws.drop_connection()
+    wait_for(lambda: tws.connections == conns_before + 2, what="reconnect")
+    wait_for(lambda: md_ok(rt), what="market data ok after reconnect")
+    assert len(tws.requests["reqContractDetails"]) == contract_before + 1   # once per process, not per connection
+    assert len(tws.requests["reqMktDepth"]) == depth_before + 2             # initial + one after reconnect
+    assert rt.engine.counters.anomalies.get("no_price_grid", 0) == 0
+    assert "depth_resync_budget_exhausted" not in rt.engine.alerts
+    summary = run.join(stop=True)
+    assert summary["connect_attempts"] == 2
+    r = replay_session(rt.recorder.session_dir)
+    assert r.live_compare is not None and r.live_compare.equivalent, r.live_compare_status
