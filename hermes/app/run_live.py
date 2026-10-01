@@ -210,6 +210,10 @@ class LiveRuntime:
             )
 
             result = self.warm_start_result
+            if self.recorder is not None and (result.used or result.applied_events):
+                # D2.4: the new recording names the history it started from, so a replay can
+                # rebuild the same starting state and verify live equivalence.
+                self.recorder.set_meta("warm_start", result.provenance(self.cfg.recorder.directory))
 
             if result.used:
                 log.info(

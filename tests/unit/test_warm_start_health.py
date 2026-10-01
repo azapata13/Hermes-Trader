@@ -181,3 +181,73 @@ def test_replayed_book_is_not_live_before_the_new_session_subscribes(tmp_path):
     r = _reasons(eng)
     assert "depth:not_subscribed" in r and "bbo:not_subscribed" in r and "l1:not_subscribed" in r
     assert not eng.snapshot().instrument(1).market_data_ok
+
+
+# ---------------------------------------------------------------------------
+# D2.4: fail-closed replay failure and deterministic re-application
+# ---------------------------------------------------------------------------
+
+def test_warm_replay_failure_fails_closed(tmp_path, monkeypatch):
+    """A processing error half-way through the warm replay must not leave the replayed connection,
+    generations or book in place (they would pass for live state before the new session starts)."""
+    eng = _engine()
+    calls = {"n": 0}
+    real = eng.on_event
+
+    def flaky(ev):
+        calls["n"] += 1
+        if calls["n"] == 20:
+            raise RuntimeError("boom")
+        real(ev)
+
+    monkeypatch.setattr(eng, "on_event", flaky)
+    res = _warm(tmp_path, "depth", eng, now_mono_ns=50_000 * MS)
+    assert not res.used and "warm replay failed" in res.reason and res.applied_events > 0
+    assert eng.connection is ConnectionState.DISCONNECTED and eng.alerts == {}
+    if 1 in eng.instruments:
+        assert all(st.generation is None for st in eng.instruments[1].streams.values())
+
+
+def test_reapplied_warm_start_is_identical(tmp_path):
+    """Same source, cutoff and monotonic base -> byte-identical starting state (what replay relies on)."""
+    from hermes.replay.warm_start import apply_recorded_warm_start
+    live = _engine()
+    res = _warm(tmp_path, "depth", live, now_mono_ns=50_000 * MS)
+    root = tmp_path / "recordings"
+    prov = res.provenance(root)
+    assert prov["source_relpath"] == "2026-10-01/20261001T130000Z-1"
+    new_session = root / "2026-10-01" / "20261001T140000Z-2"
+    new_session.mkdir(parents=True)
+    rep = _engine()
+    ok, note = apply_recorded_warm_start(rep, new_session, prov)
+    assert ok, note
+    assert rep.snapshot() == live.snapshot() and rep.state_token() == live.state_token()
+
+
+@pytest.mark.parametrize("tamper", ["session_id", "base", "missing"])
+def test_reapplication_refuses_a_source_that_does_not_match(tmp_path, tamper):
+    from hermes.replay.warm_start import apply_recorded_warm_start
+    res = _warm(tmp_path, "clean", _engine(), now_mono_ns=50_000 * MS)
+    root = tmp_path / "recordings"
+    prov = res.provenance(root)
+    if tamper == "session_id":
+        prov["source_session_id"] = "someone-else"
+    elif tamper == "base":
+        prov["base_mono_ns"] = None
+    else:
+        prov["source_relpath"], prov["source_dir"] = "2026-10-01/gone", str(tmp_path / "gone")
+    ok, note = apply_recorded_warm_start(_engine(), root / "2026-10-01" / "x", prov)
+    assert not ok and note
+
+
+def test_recording_metadata_is_frozen_once_started(tmp_path):
+    from hermes.config import RecorderConfig
+    from hermes.storage.recorder import Recorder
+    rec = Recorder(RecorderConfig(directory=str(tmp_path)), {"a": 1})
+    rec.set_meta("warm_start", {"used": False})
+    rec.start()
+    try:
+        with pytest.raises(RuntimeError):
+            rec.set_meta("late", 1)
+    finally:
+        rec.stop()

@@ -137,6 +137,12 @@ class Recorder:
         return len(self._q)
 
     # ================================================================== lifecycle
+    def set_meta(self, key: str, value: Any) -> None:
+        """Add one entry to the session metadata. Only before ``start()``: the header is written once."""
+        if self._thread is not None:
+            raise RuntimeError("recording metadata is frozen once the recorder has started")
+        self._meta[key] = value
+
     def start(self) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._open_part()

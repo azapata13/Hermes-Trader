@@ -52,6 +52,7 @@ from hermes.replay.clock import ReplayClock
 from hermes.replay.decisions import (
     DECISIONS_SIDECAR, DecisionCompare, DecisionSet, compare_decisions, decision_meta, load_decisions)
 from hermes.replay.source import Integrity, RecordingInfo, RecordingSource
+from hermes.replay.warm_start import apply_recorded_warm_start
 
 
 class ReplayMode(str, Enum):
@@ -226,6 +227,13 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
     n_events = 0
     internal_errors = 0
     normalize, on_event, observe, after_raw = norm.normalize, eng.on_event, clock.observe, ck.after_raw
+    warm_start_missing = False
+    ws = src.info.meta.get("warm_start")
+    if isinstance(ws, dict) and (ws.get("used") or ws.get("applied_events")):
+        # D2.4: the live engine started from replayed history that is not in this recording.
+        ok, note = apply_recorded_warm_start(eng, src.session_dir, ws)
+        notes.append(note)
+        warm_start_missing = not ok
     drt = DecisionRuntime(eng, cfg.decision) if (opt.decisions and cfg.decision.enabled) else None
     observers = [make(eng) for make in opt.observers]
     obs_calls = ([drt.after_event] if drt is not None else []) + [o.after_event for o in observers]
@@ -280,6 +288,16 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
         notes.append(f"{internal_errors} processing error(s) (engine fail-safe applied, as live would)")
     if ck.dropped:
         notes.append(f"{ck.dropped} checkpoint(s) dropped (max_checkpoints)")
+    if warm_start_missing:
+        why = ("warm-started live session but the warm-start source could not be re-applied: live "
+               "comparison not applicable (raw-event reproducibility only)")
+        res.live_compare_status = why
+        res.decision_compare_status = why
+        if drt is not None:
+            res.decisions = drt
+            res.decision_set = DecisionSet.from_runtime(drt, **decision_meta(cfg, res.code_fingerprint,
+                                                                             res.config_fingerprint))
+        return res
     _compare_live(res, live, cfg, ck)
     if drt is not None:
         res.decisions = drt

@@ -20,6 +20,7 @@ from hermes.ibkr import codes
 from hermes.market.health import ConflictPhase
 from hermes.market.orderbook import BookState
 from hermes.replay.runner import replay_session
+from hermes.replay.source import RecordingSource
 from hermes.storage.reader import iter_raw_events, verify_session
 from tests.fake_tws import FakeTws
 from tests.support import Harness
@@ -316,3 +317,43 @@ def test_warm_started_process_resolves_its_own_contract(tws, tmp_path, monkeypat
     # the new recording is self-contained (contract + grid recorded), so it replays on its own
     methods = [getattr(r, "method", None) for r in iter_raw_events(rt2.recorder.session_dir)]
     assert "reqContractDetails" in methods and "reqMarketRule" in methods
+
+
+def test_warm_started_session_replays_to_its_live_checkpoints(tws, tmp_path, monkeypatch):
+    """D2.4 determinism: a warm-started live session started from replayed history that is NOT in
+    its own recording, so replaying that recording alone could never reproduce the live
+    checkpoints (every warm-started session verified as MISMATCH). The recording now carries the
+    warm-start provenance; replay re-applies the same history (same source, cutoff and monotonic
+    base) first and reproduces the live market checkpoints and decisions exactly."""
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    Run(LiveRuntime(cfg), 2.0).join()
+    rt2 = LiveRuntime(cfg)
+    assert Run(rt2, 2.5).join()["healthy"]
+    ws = rt2.warm_start_result
+    assert ws.used
+    meta_ws = RecordingSource(rt2.recorder.session_dir).info.meta["warm_start"]
+    assert meta_ws["used"] and meta_ws["source_session_id"] == ws.source_session_id
+    assert meta_ws["cutoff_seq"] == ws.cutoff_seq and meta_ws["raw_events"] == ws.raw_events
+    r = replay_session(rt2.recorder.session_dir)
+    assert any(n.startswith("warm start re-applied") for n in r.notes), r.notes
+    assert r.integrity.replay_complete and r.config_source == "recorded"
+    assert r.live_compare is not None and r.live_compare.equivalent, r.live_compare_status
+    assert r.live_compare.final_match and r.final_hash == rt2.checkpointer.final.hash
+    assert r.live_compare.compared == len(rt2.checkpointer.checkpoints) > 0
+    assert r.decision_compare is not None and r.decision_compare.equivalent, r.decision_compare_status
+    assert r.engine.snapshot() == rt2.engine.snapshot()  # the whole final market state, not only hashes
+
+
+def test_warm_started_session_without_its_source_is_not_called_a_mismatch(tws, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    rt1 = LiveRuntime(cfg)
+    Run(rt1, 2.0).join()
+    rt2 = LiveRuntime(cfg)
+    Run(rt2, 2.5).join()
+    rt1.recorder.session_dir.rename(tmp_path / "moved-away")          # source recording no longer available
+    r = replay_session(rt2.recorder.session_dir)
+    assert r.live_compare is None
+    assert "warm-start source" in r.live_compare_status and "not applicable" in r.live_compare_status
+    assert any("warm-start source" in n for n in r.notes)
