@@ -11,3 +11,6 @@ recordings/
 .env
 .env.*
 !.env.example
+
+# Local launcher (copy of scripts/start_hermes.example.sh, may reference local paths)
+scripts/start_hermes.sh
