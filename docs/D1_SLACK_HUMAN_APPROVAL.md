@@ -166,6 +166,18 @@ failure. The run summary exposes Slack connection/post/update/error counters.
 For an end-to-end ENTER/REJECT test, wait for a real ACTIONABLE proposal; do not
 weaken the C9 candidate gates just to force a Slack alert.
 
+## Approver allowlist (D2.8)
+
+`HERMES_SLACK_APPROVER_IDS` is a comma-separated list of Slack user IDs (`U…` / `W…`) allowed to
+act on proposals.
+
+- A click from any other user, or with a malformed id, changes nothing. It is journaled with
+  `approver_not_allowed` / `approver_id_malformed`.
+- Without the variable, ENTER can still be recorded as intent. The audit then carries
+  `approver_allowlist_missing` and `approver_not_authorized_for_execution`.
+- A malformed list disables Slack.
+- Logs show only the number of approvers.
+
 ## Audit journal
 
 Every processed button action records, without tokens:

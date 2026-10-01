@@ -80,12 +80,22 @@ that runs Hermès (System Settings → Privacy & Security → Screen Recording).
 
 ```bash
 cd ~/hermes-trading
-git status            # scripts/start_hermes.sh may be untracked; nothing else should be
+git status            # clean (scripts/start_hermes.sh is git-ignored)
 git log -1 --oneline
-caffeinate -dimsu &   # keep the Mac awake for the whole run
-scripts/start_hermes.sh            # or: python -m hermes.app.run_live
-# smoke test:  python -m hermes.app.run_live --duration 120
+scripts/start_hermes.sh            # or: caffeinate -dimsu python -m hermes.app.run_live
+# smoke test:  scripts/start_hermes.sh --duration 120
 ```
+
+`scripts/start_hermes.example.sh` is the reviewed reference for the local launcher. It:
+
+- activates `.venv`;
+- loads `.env.local` silently and warns unless it is `chmod 600`;
+- **refuses to start** unless `orders_enabled = false`, `read_only = true` and `mode = "HUMAN_APPROVAL"`;
+- prints only non-secret facts;
+- keeps the Mac awake;
+- `exec`s Python so that Ctrl-C reaches Hermès.
+
+Compare your local `scripts/start_hermes.sh` with it.
 
 Signals (handled by `Supervisor.install_signal_handlers`):
 
@@ -110,6 +120,11 @@ In this order:
 5. No `ALERT …` line.
    - `depth_resync_budget_exhausted`: the depth subscription keeps failing; the log line names the last reason.
    - `market_data_conflict_retries_exhausted`: 10197.
+   - `contract_identity_mismatch` (D2.7): the live process resolved a different conId than the
+     warm-start history. The contract is refused; restart with `HERMES_WARM_START=0` after checking
+     `[instrument]` and TWS.
+6. `Slack approvers: N approver(s)`, or `not configured (ENTER can be recorded as intent but never
+   authorizes execution)` (D2.8).
 
 ## 6. Health layers: do not mix them
 
@@ -124,7 +139,7 @@ In this order:
 UNHEALTHY is always explained by `problems` / `NOT-OK: <reasons>`. Typical reasons:
 
 - `connection:*`
-- `contract:*`
+- `contract:*` (`contract:historical` right after a warm start, until the live process defines the same conId)
 - `depth:requested` (no depth yet)
 - `depth:error_<code>`
 - `book:building(insufficient_depth)`
@@ -134,7 +149,8 @@ UNHEALTHY is always explained by `problems` / `NOT-OK: <reasons>`. Typical reaso
 
 Warm start note: replayed history (bars, tape, VWAP) is reused. Replayed **health** never
 is: a warm-started process starts with no alert, a fresh 10197 budget, unsubscribed
-streams and an invalidated book (D2.3).
+streams and an invalidated book (D2.3). Its contract identity is historical until the live
+process resolves the same conId; a different conId fails closed (D2.7).
 
 ## 7. Slack D1.9 criteria (on a real ACTIONABLE candidate)
 
@@ -162,6 +178,8 @@ Approval behavior to observe (**REJECT only, never ENTER**):
 - REJECT closes the workflow and is journaled.
 - An old, expired, unknown or safety-blocked view fails closed.
 - Malformed Slack payloads are ignored (D2.5).
+- With `HERMES_SLACK_APPROVER_IDS` set, a click from anyone else changes nothing. It appears in
+  `human_approvals.jsonl` with `approver_not_allowed` (D2.8).
 
 ## 8. Stop and verify
 
@@ -184,8 +202,9 @@ python tools/depth_report.py  "$(ls -td ~/hermes-data/recordings/*/* | head -1)"
 2. API settings: socket clients on, Read-Only API on, port 7496, localhost only.
 3. MNQZ6 depth available (CME L2); no BookTrader / DOM window holding the depth lines.
 4. `git status` / `git log -1` as expected; `config/hermes.toml` invariants (§1).
-5. Slack variables present; `HERMES_SCREENSHOT_ENABLED=1` if the screenshot is part of the test.
-6. `caffeinate -dimsu`.
+5. Slack variables present; `HERMES_SLACK_APPROVER_IDS` set to your own Slack user ID (Slack profile →
+   ⋮ → Copy member ID); `HERMES_SCREENSHOT_ENABLED=1` if the screenshot is part of the test.
+6. `caffeinate -dimsu` (the reference launcher does it).
 7. Start Hermès (§4) and read the startup lines (§5).
 8. Console `OK`, book `VALID`, streams active (§6).
 9. Wait for a real candidate during RTH. Do not fabricate one.
@@ -206,7 +225,9 @@ Covered by tests (fake TWS speaking the ibapi wire protocol + replay):
 - 317 / structural resync;
 - live/replay equivalence, also for warm-started sessions;
 - SafetyPolicy blocks;
-- Slack rendering, approval fail-closed and malformed interactions.
+- contract identity mismatch after a warm start (D2.7);
+- Slack rendering, approval fail-closed, malformed interactions and the approver allowlist (D2.8);
+- no secret in startup logs or the Slack summary.
 
 **NOT LIVE-VERIFIED** until observed on the Mac mini with real TWS:
 
