@@ -1,0 +1,183 @@
+"""Warm start reconstructs market HISTORY, never the previous process's live HEALTH state.
+
+Regression (D1.9 live validation): a recording that ended after ``depth_resync_exhausted`` was
+replayed by the warm start, re-raising ``depth_resync_budget_exhausted`` in the new process. The
+only thing that clears that alert is the *same session's* budget reset, which a new process never
+posts, so the alert survived a fully healthy live reconnection: market data stayed "not OK",
+SafetyPolicy kept a ``critical_alert`` and every proposal was BLOCKED. Each failed run then became
+the next warm-start recording, so the state perpetuated itself.
+
+These tests pin both sides of the fix:
+- alerts / 10197 recovery replayed from the recording are reported as HISTORICAL and are not live
+  state after the warm start;
+- a NEW live alert (raised by the live session after warm start) is still raised and still blocks.
+"""
+
+from __future__ import annotations
+
+import os
+from unittest import mock
+
+import pytest
+
+from hermes.config import BookConfig, SessionConfig, SubscriptionsConfig
+from hermes.ibkr import raw_events as R
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market.engine import (
+    ALERT_CONFLICT_EXHAUSTED,
+    ALERT_DEPTH_RESYNC_EXHAUSTED,
+    MarketEngine,
+)
+from hermes.market.events import ConnectionState
+from hermes.market.health import ConflictPhase
+from hermes.replay.warm_start import warm_start_engine
+from tests.support import MS, SPEC, RawScript, write_hrec
+
+T0_WALL = 1_790_000_000 * 10**9
+
+
+def _engine() -> MarketEngine:
+    return MarketEngine(BookConfig(), SessionConfig(), SubscriptionsConfig())
+
+
+def _failed_session(kind: str) -> RawScript:
+    """A recorded session that ended with a critical alert, then the connection closed."""
+    s = RawScript(wall0=T0_WALL)
+    s.bootstrap().seed_book()
+    s.advance(600).tick()
+    for i in range(5):                                   # some history worth warm-starting
+        s.advance(1000)
+        s.trade(10_003, 21000.25 if i % 2 else 21000.0)
+    if kind == "depth":
+        s.control("depth_resync_exhausted", "5 resyncs within 300.0s")
+    elif kind == "conflict":
+        for _ in range(SessionConfig().conflict_max_attempts + 1):
+            s.error(-1, 10197, "No market data during competing live session")
+            s.advance(10).control("conflict_recovery_attempt")
+            s.advance(SessionConfig().recovery_attempt_timeout_s * 1000 + 10).tick()
+    s.advance(100).closed()
+    return s
+
+
+def _record(tmp_path, script: RawScript):
+    root = tmp_path / "recordings"
+    write_hrec(root / "2026-10-01" / "20261001T130000Z-1", script.events,
+               meta={"contract_spec": dict(SPEC.to_params())})
+    return root
+
+
+def _warm(tmp_path, kind: str, engine: MarketEngine, now_mono_ns: int):
+    root = _record(tmp_path, _failed_session(kind))
+    with mock.patch.dict(os.environ, {"HERMES_WARM_START": "1"}):
+        return warm_start_engine(engine, root, expected_contract_spec=dict(SPEC.to_params()),
+                                 max_age_s=10**9, now_mono_ns=now_mono_ns)
+
+
+def _live(engine: MarketEngine, mono0: int, *, extra=None) -> RawScript:
+    """A NEW process' live session (fresh normalizer, seq restarting at 1) that is fully healthy."""
+    s = RawScript(mono0=mono0, wall0=T0_WALL + 3600 * 10**9)
+    s.control("connect_attempt")
+    s.bootstrap().seed_book()
+    s.advance(600).tick()
+    if extra is not None:
+        extra(s)
+    n = Normalizer()
+    for raw in s.events:
+        for ev in n.normalize(raw):
+            engine.on_event(ev)
+    return s
+
+
+def _reasons(engine: MarketEngine) -> list[str]:
+    return engine.market_data_reasons(engine.instruments[1])
+
+
+@pytest.mark.parametrize("kind,alert", [("depth", ALERT_DEPTH_RESYNC_EXHAUSTED),
+                                        ("conflict", ALERT_CONFLICT_EXHAUSTED)])
+def test_replayed_alert_is_historical_not_live(tmp_path, kind, alert):
+    eng = _engine()
+    res = _warm(tmp_path, kind, eng, now_mono_ns=50_000 * MS)
+    assert res.used, res.reason
+    # the alert WAS in the recording and is reported, never silently dropped
+    assert alert in res.historical_alerts
+    # ...but it is not live state of the new process
+    assert alert not in eng.alerts and eng.new_alerts == []
+    assert eng.connection is ConnectionState.DISCONNECTED
+    assert eng.conflict.phase is ConflictPhase.NONE and eng.conflict.attempts == 0
+    # history is preserved (the tape survives; only health state was reset)
+    assert res.tape_size == 5 and len(eng.instruments[1].tape) == 5
+    # replayed book / subscriptions are not live: nothing can pass for a live stream
+    assert all(st.generation is None for st in eng.instruments[1].streams.values())
+    assert eng.instruments[1].book.state.value != "valid"
+    # a healthy live reconnection is then genuinely usable
+    _live(eng, mono0=10**15)
+    assert _reasons(eng) == []
+    assert eng.snapshot().instrument(1).market_data_ok
+
+
+def test_without_fix_semantics_documented_replayed_alert_would_block(tmp_path):
+    """The recording really does produce the alert when replayed verbatim (guards the repro)."""
+    eng = _engine()
+    n = Normalizer()
+    for raw in _failed_session("depth").events:
+        if isinstance(raw, R.RawConnectionClosed):
+            break
+        for ev in n.normalize(raw):
+            eng.on_event(ev)
+    assert ALERT_DEPTH_RESYNC_EXHAUSTED in eng.alerts
+
+
+def test_new_live_depth_alert_after_warm_start_still_blocks(tmp_path):
+    eng = _engine()
+    _warm(tmp_path, "depth", eng, now_mono_ns=50_000 * MS)
+    _live(eng, mono0=10**15,
+          extra=lambda s: s.advance(100).control("depth_resync_exhausted", "5 resyncs within 300.0s"))
+    assert ALERT_DEPTH_RESYNC_EXHAUSTED in eng.alerts
+    assert ALERT_DEPTH_RESYNC_EXHAUSTED in eng.new_alerts          # surfaced as a NEW live alert
+    assert f"alert:{ALERT_DEPTH_RESYNC_EXHAUSTED}" in _reasons(eng)
+    assert not eng.snapshot().instrument(1).market_data_ok
+
+
+def test_new_live_conflict_after_warm_start_still_blocks(tmp_path):
+    eng = _engine()
+    _warm(tmp_path, "conflict", eng, now_mono_ns=50_000 * MS)
+    _live(eng, mono0=10**15,
+          extra=lambda s: s.advance(10).error(-1, 10197, "No market data during competing live session"))
+    assert eng.conflict.active
+    assert any(r.startswith("conflict_10197:") for r in _reasons(eng))
+    assert not eng.snapshot().instrument(1).market_data_ok
+
+
+def test_clean_recording_has_no_historical_alerts(tmp_path):
+    eng = _engine()
+    res = _warm(tmp_path, "clean", eng, now_mono_ns=50_000 * MS)
+    assert res.used and res.historical_alerts == () and res.historical_conflict_phase == "none"
+    _live(eng, mono0=10**15)
+    assert _reasons(eng) == []
+
+
+def test_replayed_book_is_not_live_before_the_new_session_subscribes(tmp_path):
+    """Second half of the same defect: after a warm start, a NEW connection that has resolved the
+    contract but not yet re-subscribed must not report usable market data from the recording's
+    old book / generations (previously market_data_reasons() was empty in that window)."""
+    from tests.support import CONTRACT
+    eng = _engine()
+    _warm(tmp_path, "clean", eng, now_mono_ns=50_000 * MS)
+    s = RawScript(mono0=10**15, wall0=T0_WALL + 3600 * 10**9)
+    s.control("connect_attempt")
+    s.next_valid_id()
+    s.request("reqMarketDataType", None, iid=0, market_data_type=1)
+    s.request("reqContractDetails", CONTRACT, **dict(SPEC.to_params()))
+    s.contract_details()
+    s.contract_end()
+    s.request("reqMarketRule", None, rule_id=67)
+    s.market_rule()
+    s.advance(600).tick()
+    n = Normalizer()
+    for raw in s.events:
+        for ev in n.normalize(raw):
+            eng.on_event(ev)
+    assert eng.connection is ConnectionState.CONNECTED
+    r = _reasons(eng)
+    assert "depth:not_subscribed" in r and "bbo:not_subscribed" in r and "l1:not_subscribed" in r
+    assert not eng.snapshot().instrument(1).market_data_ok

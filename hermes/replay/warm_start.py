@@ -35,6 +35,9 @@ class WarmStartResult:
     session_volume: int = 0
     session_vwap: float | None = None
     trading_date: str | None = None
+    # alerts the RECORDED process had raised; reported, never carried into live health
+    historical_alerts: tuple[str, ...] = ()
+    historical_conflict_phase: str | None = None
 
 
 def _latest_session(root: Path, max_age_s: float) -> tuple[Path, float] | None:
@@ -235,7 +238,17 @@ def warm_start_engine(
     session_stats = session.session if session is not None else None
 
     # Historical market state is now reconstructed, but the live supervisor
-    # must own connection/subscription state from here onward.
+    # must own connection/subscription state from here onward. The recorded
+    # process's health (alerts, 10197 budget, subscription generations, book)
+    # is historical: it is reported, not carried into the new process.
+    historical_conflict = engine.conflict.phase.value
+    historical = engine.end_replayed_session(engine.last_mono_ns)
+    if historical or historical_conflict != "none":
+        log.warning(
+            "WARM START | recording ended with alert(s) %s, 10197 phase=%s | historical "
+            "(previous process), not carried into live health; live checks start fresh",
+            ",".join(sorted(historical)) or "-", historical_conflict,
+        )
     engine.connection = ConnectionState.DISCONNECTED
     engine.last_seq = 0
     engine.last_mono_ns = 0
@@ -266,4 +279,6 @@ def warm_start_engine(
             if session is not None
             else None
         ),
+        historical_alerts=tuple(sorted(historical)),
+        historical_conflict_phase=historical_conflict,
     )

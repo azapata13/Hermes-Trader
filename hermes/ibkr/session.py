@@ -128,7 +128,13 @@ class IbkrSession:
         try:
             self.gw.req_market_data_type(1)                   # LIVE; must precede reqMktData
             inst = self.engine.instruments.get(self.iid)
-            if inst is not None and inst.contract_state == "defined" and inst.con_id is not None:
+            # Reconnect shortcut only when THIS process's normalizer already holds the contract and
+            # price grid. A warm-start replay defines the instrument in the engine through a separate
+            # normalizer; the live one still has no grid, so every price would be rejected
+            # (no_price_grid) -> depth invalidated -> resync budget exhausted. Resolve it instead.
+            if (inst is not None and inst.contract_state == "defined" and inst.con_id is not None
+                    and self.p.normalizer.price_grid(self.iid) is not None
+                    and self.p.normalizer.resolved_contract(self.iid) is not None):
                 self._subscribe_all(now)                      # reconnect: contract already known
                 self._set_phase(Phase.STREAMING, now)
             else:

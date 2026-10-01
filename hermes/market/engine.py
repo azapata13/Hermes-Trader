@@ -669,6 +669,42 @@ class MarketEngine:
     def readonly_violation(self, detail: str) -> None:
         self._alert(ALERT_READONLY_VIOLATION, detail)
 
+    def end_replayed_session(self, now_mono_ns: int) -> dict[str, str]:
+        """Warm start only: end the connection-scoped LIVE state rebuilt from a recording.
+
+        A warm-start replay reconstructs market HISTORY (bars, tape, sessions, metrics) but also
+        re-creates the recorded process's health state: its alerts, its 10197 recovery budget, its
+        subscription generations and its book. None of that describes the new process: the
+        mechanisms that clear those alerts (the session's own resync/conflict budgets) are not
+        inherited, so a replayed alert could never clear, and replayed generations/book could pass
+        for a live subscription before the new session has subscribed anything.
+
+        Afterwards health equals a freshly started engine: no alerts, fresh 10197 budget, no
+        farm / not-live / resubscribe flags, every stream unsubscribed and every book invalidated
+        (DISCONNECT). Alerts raised by the NEW live session are handled exactly as before. Returns
+        the replayed alerts so the caller reports them as historical; nothing is silently dropped.
+        """
+        historical = dict(self.alerts)
+        self.alerts.clear()
+        self.new_alerts.clear()
+        c = self.conflict
+        self.conflict = ConflictRecovery(max_attempts=c.max_attempts, attempt_timeout_ns=c.attempt_timeout_ns)
+        self.farm_broken = False
+        self.not_live = False
+        self._not_live_seq = -1
+        self.resubscribe_all_pending = False
+        self._resubscribe_all_seq = -1
+        self._invalidate_books(InvalidationReason.DISCONNECT, now_mono_ns)
+        for inst in self.instruments.values():
+            inst.market_data_type = None
+            inst.mdt_generation = None
+            for st in inst.streams.values():
+                st.generation = None
+                if st.status is not StreamStatus.IDLE:
+                    st.status = StreamStatus.DISCONNECTED
+        self.connection = ConnectionState.DISCONNECTED
+        return historical
+
     def _alert(self, key: str, detail: str) -> None:
         if key not in self.alerts:
             self.new_alerts.append(key)

@@ -230,3 +230,89 @@ def test_connect_refused_is_unhealthy_and_retries(tmp_path):
     summary = Run(rt, 1.5).join()
     assert not summary["healthy"] and "market data never became OK" in summary["problems"]
     assert summary["connect_attempts"] >= 2
+
+
+def test_warm_start_does_not_resurrect_previous_process_alert(tws, tmp_path, monkeypatch):
+    """D1.9 live-validation regression, end to end through the real LiveRuntime.
+
+    Run 1 ends with a critical alert (10197 budget exhausted) and is recorded. Run 2 is a NEW
+    process that warm-starts from that recording against a now-healthy TWS: the alert is reported
+    as historical, the new session reaches market_data_ok and is healthy. Before the fix the
+    replayed alert could never clear, so every later run stayed UNHEALTHY (and recorded the same
+    state again for the next warm start)."""
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    rt1 = LiveRuntime(cfg)
+    run1 = Run(rt1, 7.0)
+    wait_for(lambda: rt1.warm_start_result is not None, what="warm start decision (run 1)")
+    assert not rt1.warm_start_result.used                     # nothing recorded yet
+    wait_for(lambda: md_ok(rt1), what="market data ok (run 1)")
+    tws.conflict_mode = True
+    tws.error(-1, 10197, "No market data during competing live session")
+    wait_for(lambda: rt1.engine.conflict.phase is ConflictPhase.EXHAUSTED, timeout=10, what="budget exhausted")
+    assert "market_data_conflict_retries_exhausted" in rt1.engine.alerts
+    assert not run1.join(stop=True)["healthy"]
+
+    tws.conflict_mode = False                       # the operator fixed TWS; a new process starts
+    rt2 = LiveRuntime(cfg)
+    run2 = Run(rt2, 2.5)
+    wait_for(lambda: rt2.warm_start_result is not None, what="warm start (run 2)")
+    ws = rt2.warm_start_result
+    assert ws.used, ws
+    assert "market_data_conflict_retries_exhausted" in ws.historical_alerts
+    assert ws.historical_conflict_phase == "exhausted"
+    wait_for(lambda: md_ok(rt2), what="market data ok (run 2, after warm start)")
+    summary = run2.join()
+    assert summary["healthy"], summary["problems"]
+    assert not any("alert:" in p for p in summary["problems"])
+
+
+def test_warm_start_keeps_new_live_alert_visible(tws, tmp_path, monkeypatch):
+    """The fix must not mask a REAL live alert: if the conflict persists in the new process, the
+    new session raises it again and stays unhealthy."""
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    rt1 = LiveRuntime(cfg)
+    run1 = Run(rt1, 7.0)
+    wait_for(lambda: md_ok(rt1), what="market data ok (run 1)")
+    tws.conflict_mode = True
+    tws.error(-1, 10197, "No market data during competing live session")
+    wait_for(lambda: rt1.engine.conflict.phase is ConflictPhase.EXHAUSTED, timeout=10, what="budget exhausted")
+    run1.join(stop=True)
+
+    rt2 = LiveRuntime(cfg)                          # conflict still present at TWS
+    run2 = Run(rt2, 9.0)
+    wait_for(lambda: rt2.warm_start_result is not None, what="warm start (run 2)")
+    assert rt2.warm_start_result.used
+    assert "market_data_conflict_retries_exhausted" in rt2.warm_start_result.historical_alerts
+    wait_for(lambda: rt2.engine.conflict.phase is ConflictPhase.EXHAUSTED, timeout=12,
+             what="live budget exhausted again")
+    assert "market_data_conflict_retries_exhausted" in rt2.engine.alerts
+    assert not md_ok(rt2)
+    assert not run2.join(stop=True)["healthy"]
+
+
+def test_warm_started_process_resolves_its_own_contract(tws, tmp_path, monkeypatch):
+    """ROOT CAUSE of the D1.9 live UNHEALTHY state. After a warm start the engine already says
+    contract 'defined' (from the replay), so the session took the reconnect shortcut and subscribed
+    without resolving the contract in the NEW process. The live normalizer then had no price grid:
+    every depth/BBO/trade price was rejected (no_price_grid), the book was invalidated on each row,
+    and the 5 depth resyncs were exhausted -> depth_resync_budget_exhausted on every warm start."""
+    monkeypatch.setenv("HERMES_WARM_START", "1")
+    cfg = fast_cfg(tws.port, tmp_path)
+    s1 = Run(LiveRuntime(cfg), 2.0).join()
+    assert s1["healthy"], s1["problems"]                     # a perfectly healthy recorded session
+
+    rt2 = LiveRuntime(cfg)
+    s2 = Run(rt2, 3.0).join()
+    assert rt2.warm_start_result.used and rt2.warm_start_result.tape_size >= 1
+    assert s2["healthy"], s2["problems"]
+    assert len(tws.requests["reqContractDetails"]) == 2      # the new process resolved the contract
+    assert len(tws.requests["reqMktDepth"]) == 2             # one subscription per process, no resync storm
+    assert rt2.engine.counters.anomalies.get("no_price_grid", 0) == 0
+    assert "depth_resync_budget_exhausted" not in rt2.engine.alerts
+    # warm history survived the new process's contract definition
+    assert len(rt2.engine.instruments[1].tape) >= rt2.warm_start_result.tape_size
+    # the new recording is self-contained (contract + grid recorded), so it replays on its own
+    methods = [getattr(r, "method", None) for r in iter_raw_events(rt2.recorder.session_dir)]
+    assert "reqContractDetails" in methods and "reqMarketRule" in methods
