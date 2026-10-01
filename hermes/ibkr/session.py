@@ -262,14 +262,22 @@ class IbkrSession:
             self._resync_times.popleft()
         if len(self._resync_times) >= self.cfg.session.resync_max_per_window:
             self._resync_exhausted = True
-            log.critical("depth resync budget exhausted; automatic depth resubscription stopped")
+            log.critical("depth resync budget exhausted; automatic depth resubscription stopped (last reason=%s)",
+                         self._stale_reason())
             self.p.post_local(R.RawControl, kind="depth_resync_exhausted",
                               detail=f"{len(self._resync_times)} resyncs within {self.cfg.session.resync_window_s}s")
             return
         self._resync_times.append(now)
         self._last_resync = now
-        log.warning("depth resync (%d in window)", len(self._resync_times))
+        log.warning("depth resync (%d in window) reason=%s", len(self._resync_times), self._stale_reason())
         self._subscribe(Stream.DEPTH)
+
+    def _stale_reason(self) -> str:
+        """Why the book asked for a resync (observability only; never used for decisions)."""
+        inst = self.engine.instruments.get(self.iid)
+        book = inst.book if inst is not None else None
+        reason = book.stale_reason if book is not None else None
+        return reason.value if reason is not None else "unknown"
 
     def _reset_budgets(self, why: str) -> None:
         if self._resync_exhausted:

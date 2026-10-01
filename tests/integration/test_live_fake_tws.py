@@ -252,7 +252,8 @@ def test_warm_start_does_not_resurrect_previous_process_alert(tws, tmp_path, mon
     tws.error(-1, 10197, "No market data during competing live session")
     wait_for(lambda: rt1.engine.conflict.phase is ConflictPhase.EXHAUSTED, timeout=10, what="budget exhausted")
     assert "market_data_conflict_retries_exhausted" in rt1.engine.alerts
-    assert not run1.join(stop=True)["healthy"]
+    s1 = run1.join(stop=True)
+    assert not s1["healthy"] and s1["process_ok"] and not s1["market_data_ok_before_shutdown"]
 
     tws.conflict_mode = False                       # the operator fixed TWS; a new process starts
     rt2 = LiveRuntime(cfg)
@@ -309,6 +310,8 @@ def test_warm_started_process_resolves_its_own_contract(tws, tmp_path, monkeypat
     assert rt2.warm_start_result.used and rt2.warm_start_result.tape_size >= 1
     assert s2["healthy"], s2["problems"]
     assert len(tws.requests["reqContractDetails"]) == 2      # the new process resolved the contract
+    assert s2["process_ok"] and s2["market_data_ok_before_shutdown"] and s2["depth_ok_before_shutdown"]
+    assert s2["warm_start"].startswith("used: ") and s1["warm_start"].startswith("not used (")
     assert len(tws.requests["reqMktDepth"]) == 2             # one subscription per process, no resync storm
     assert rt2.engine.counters.anomalies.get("no_price_grid", 0) == 0
     assert "depth_resync_budget_exhausted" not in rt2.engine.alerts
@@ -385,3 +388,18 @@ def test_reconnect_after_warm_start_keeps_live_contract_and_recovers(tws, tmp_pa
     assert summary["connect_attempts"] == 2
     r = replay_session(rt.recorder.session_dir)
     assert r.live_compare is not None and r.live_compare.equivalent, r.live_compare_status
+
+
+def test_depth_resync_log_names_the_invalidation_reason(tws, tmp_path, caplog):
+    """Observability: after the fact we must be able to say WHY a depth resync happened."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="hermes.session")
+    rt = LiveRuntime(fast_cfg(tws.port, tmp_path))
+    run = Run(rt, 4.0)
+    wait_for(lambda: md_ok(rt), what="market data ok")
+    old_depth = tws.requests["reqMktDepth"][0]
+    tws.depth(old_depth, 9, 1, 1, 21000.0, 1)         # update at a non-existent row -> structural violation
+    wait_for(lambda: len(tws.requests["reqMktDepth"]) == 2, what="depth resync")
+    run.join(stop=True)
+    lines = [r.getMessage() for r in caplog.records if "depth resync" in r.getMessage()]
+    assert lines and "reason=structural_violation" in lines[0], lines

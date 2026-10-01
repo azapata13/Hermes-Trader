@@ -887,12 +887,30 @@ class LiveRuntime:
             "connection_before_shutdown": snap.connection.value if snap is not None else None,
             "live_data_confirmed": bool(inst and inst.market_data_type == 1 and self.pipeline.ever_market_data_ok),
             "read_only_violations": violations,
+            # D2.4 observability: keep the layers apart (``healthy`` above is the conjunction)
+            "process_ok": not violations and not self.pipeline.internal_errors
+            and (ver is None or ver.replay_complete),
+            "market_data_ok_before_shutdown": bool(inst and inst.market_data_ok),
+            "depth_ok_before_shutdown": bool(inst and inst.book and inst.book.state.value == "valid"),
+            "warm_start": self._warm_start_line(),
             "slack": (self.slack_bridge.summary() if self.slack_bridge is not None else
                       {"enabled": False, **({"config_error": self.slack_config_error}
                                            if self.slack_config_error is not None else {})}),
             "hermes_version": HERMES_VERSION, "git_commit": git_commit(), "code_fingerprint": fp.code_fingerprint(),
             **dec,
         }
+
+    def _warm_start_line(self) -> str:
+        r = self.warm_start_result
+        if r is None:
+            return "not attempted"
+        if not r.used:
+            return f"not used ({r.reason})"
+        line = (f"used: {r.source_session_id} cutoff_seq={r.cutoff_seq} raw={r.raw_events} "
+                f"bars 30s/1m/5m={r.bars_30s}/{r.bars_1m}/{r.bars_5m}")
+        if r.historical_alerts:
+            line += " historical_alerts=" + ",".join(r.historical_alerts)
+        return line
 
     def decision_summary(self, pre_shutdown_seq: int | None) -> dict[str, Any]:
         d = self.decisions
