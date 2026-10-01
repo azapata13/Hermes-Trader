@@ -251,3 +251,49 @@ def test_recording_metadata_is_frozen_once_started(tmp_path):
             rec.set_meta("late", 1)
     finally:
         rec.stop()
+
+
+def test_warm_history_never_makes_a_candidate_actionable_without_live_depth(tmp_path):
+    """Scenario F after a warm start: the replayed history alone (11 minutes of a clean trend,
+    enough bars for every timeframe) must not let the decision layer produce an ACTIONABLE
+    candidate while the NEW live session has no valid DOM. Evaluations do run (non-vacuous) and
+    are BLOCKED by the safety policy with the market-data reasons."""
+    from hermes.decision.runtime import DecisionRuntime, JournalKind
+    from tests.support import BBO, TICK, TRADES, Harness
+    from tests.unit.test_candidate import WEEK, trend
+
+    rec = trend(+1, minutes=11)
+    root = tmp_path / "recordings"
+    write_hrec(root / "2026-10-01" / "s1", rec.events, meta={"contract_spec": dict(SPEC.to_params())})
+    h = Harness()
+    with mock.patch.dict(os.environ, {"HERMES_WARM_START": "1"}):
+        res = warm_start_engine(h.engine, root, expected_contract_spec=dict(SPEC.to_params()),
+                                max_age_s=10**12, now_mono_ns=10**12)
+    assert res.used and res.bars_1m >= 10
+    rt = DecisionRuntime(h.engine)
+    s = RawScript(mono0=10**15, wall0=rec.events[-1].recv_wall_ns + 5 * 10**9)
+    s.control("connect_attempt")
+    s.bootstrap(**WEEK)
+    bid = 21000.0 + TICK * 75
+    s.bbo(BBO, bid, bid + TICK)
+    s.mdt()                                          # LIVE quotes and prints, but depth never arrives
+    for k in range(40):
+        s.advance(5000)
+        if k % 3 == 0:
+            bid += TICK
+            s.bbo(BBO, bid, bid + TICK)
+        s.trade(TRADES, bid + TICK, 3)
+        s.tick()
+    n = Normalizer()
+    for raw in s.events:
+        for ev in n.normalize(raw):
+            h.engine.on_event(ev)
+        rt.after_event(raw, (), raw.recv_mono_ns)
+    evals = [r for r in rt.journal if r.kind is JournalKind.DECISION_EVALUATED]
+    assert evals, "the decision layer must have evaluated (otherwise this test proves nothing)"
+    assert not any(r.kind in (JournalKind.CANDIDATE_ACTIONABLE, JournalKind.APPROVAL_VIEW_CREATED)
+                   for r in rt.journal)
+    assert rt.last_view is None
+    for r in evals:
+        codes = {c for (_sev, src, c) in r.reasons if src == "safety"}
+        assert r.status == "BLOCKED" and {"book_not_valid", "market_data_not_ok"} <= codes, r
