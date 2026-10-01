@@ -60,6 +60,7 @@ Never print, log or commit the values. `scripts/start_hermes.sh` is intentionall
 | `SLACK_BOT_TOKEN` | for Slack | — | `xoxb-…`; all three Slack variables or none (partial = Slack disabled with an error) |
 | `SLACK_APP_TOKEN` | for Slack | — | `xapp-…` (Socket Mode) |
 | `HERMES_SLACK_CHANNEL_ID` | for Slack | — | channel **ID** (`C…`), not a name |
+| `HERMES_SLACK_APPROVER_IDS` | recommended | unset | comma-separated Slack user IDs allowed to act (D2.8). Others are ignored and audited; unset = ENTER recorded as intent only, flagged `approver_allowlist_missing`; malformed = Slack disabled |
 | `OPENAI_API_KEY` | for Luna/Sol only | — | optional; without it the screenshot is posted without AI notes |
 | `HERMES_AI_ENABLED` | no | `0` | Luna/Sol notes on the screenshot |
 | `HERMES_SCREENSHOT_ENABLED` | no | `0` | TWS screenshot in the Slack thread (macOS `screencapture`) |

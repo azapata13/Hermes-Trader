@@ -30,6 +30,7 @@ from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
 from hermes.decision.approval import current_approval_payload, render_approval_text
 from hermes.decision.runtime import DecisionRuntime, JournalKind, JournalRecord
+from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
 from hermes.slack.bridge import SlackApprovalBridge
 from hermes.slack.journal import ApprovalJournal
 from hermes.slack.socket_mode import SlackConfigError, SlackSettings, SlackSocketModeTransport
@@ -153,11 +154,15 @@ class LiveRuntime:
             self.pipeline.consumers.append(self.decisions)
             try:
                 slack_settings = SlackSettings.from_env()
-            except SlackConfigError as exc:
+                approvers = ApproverPolicy.from_env()
+            except (SlackConfigError, ApproverConfigError) as exc:
                 self.slack_config_error = str(exc)
                 log.error("Slack disabled by configuration error: %s", exc)
             else:
                 if slack_settings is not None:
+                    log.info("Slack approvers: %s%s", approvers.describe(),
+                             "" if approvers.configured else
+                             " (ENTER can be recorded as intent but never authorizes execution)")
                     journal_path = os.environ.get("HERMES_SLACK_JOURNAL")
                     if not journal_path:
                         journal_path = str(Path(cfg.telemetry.log_directory).expanduser() / "human_approvals.jsonl")
@@ -169,6 +174,7 @@ class LiveRuntime:
                         ApprovalJournal(journal_path),
                         market_context_provider=self._slack_market_context,
                         status_provider=self._slack_status,
+                        approvers=approvers,
                     )
                     # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
                     # AFTER DecisionRuntime has applied the current market event.

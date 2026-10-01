@@ -26,6 +26,7 @@ from hermes.decision.response import (
     response_matches_view,
 )
 from hermes.decision.runtime import JournalKind, JournalRecord
+from hermes.slack.approvers import ApproverPolicy
 from hermes.slack.chat import ConversationalWorker
 from hermes.slack.enrichment import VisualEnrichmentWorker
 from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
@@ -76,6 +77,7 @@ class SlackBridgeStats:
     duplicates: int = 0
     accepted_enters: int = 0
     rejects: int = 0
+    unauthorized: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -91,6 +93,7 @@ class SlackBridgeStats:
             "duplicates": self.duplicates,
             "accepted_enters": self.accepted_enters,
             "rejects": self.rejects,
+            "unauthorized": self.unauthorized,
         }
 
 
@@ -135,12 +138,14 @@ class SlackApprovalBridge:
         status_provider=None,
         max_outbox: int = 256,
         max_interactions_per_event: int = 16,
+        approvers: ApproverPolicy | None = None,
     ) -> None:
         self.runtime = runtime
         self.engine = engine
         self.cfg = cfg
         self.transport = transport
         self.journal = journal or ApprovalJournal()
+        self.approvers = approvers or ApproverPolicy(None)   # None = allowlist missing (fail closed for execution)
         self.enrichment = VisualEnrichmentWorker(transport)
 
         if market_context_provider is None:
@@ -255,6 +260,16 @@ class SlackApprovalBridge:
         accepted = False
         current: ApprovalPayload | None = None
 
+        approver = self.approvers.check(i.user_id)
+        codes.append(approver.value)
+        if not approver.may_act:
+            # D2.8 fail closed: an unlisted / malformed identity changes nothing; audited only.
+            self.stats.unauthorized += 1
+            codes.append("enter_failed_closed" if i.action is SlackAction.ENTER else "reject_not_recorded")
+            self.journal.append(self._audit(i, raw, None, None, None, codes, accepted=False))
+            log.warning("Slack %s ignored: %s", i.action.value, approver.value)
+            return
+
         with self._display_lock:
             displayed = self._displayed.get(i.proposal_id)
 
@@ -341,6 +356,8 @@ class SlackApprovalBridge:
             if enter_ok:
                 prereq = execution_prerequisites(response, rec, current.approval_safety)
                 codes.extend(prereq.codes)
+                if not approver.may_authorize_execution:
+                    codes.append("approver_not_authorized_for_execution")
                 accepted = True
                 self._human_closed.add(i.proposal_id)
                 self.stats.accepted_enters += 1
@@ -363,7 +380,11 @@ class SlackApprovalBridge:
                         )
                     )
 
-        entry = ApprovalAuditEntry(
+        self.journal.append(self._audit(i, raw, response, displayed, current, codes, accepted=accepted))
+
+    @staticmethod
+    def _audit(i: SlackInteraction, raw, response, displayed, current, codes, *, accepted: bool) -> ApprovalAuditEntry:
+        return ApprovalAuditEntry(
             interaction_id=i.interaction_id,
             slack_user_id=i.user_id,
             action=i.action.value,
@@ -382,7 +403,6 @@ class SlackApprovalBridge:
             accepted_human_intent=accepted,
             authorizes_execution=False,
         )
-        self.journal.append(entry)
 
     def _enqueue(self, item: OutboundView) -> None:
         try:
