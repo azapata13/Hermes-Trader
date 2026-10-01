@@ -297,3 +297,57 @@ def test_warm_history_never_makes_a_candidate_actionable_without_live_depth(tmp_
     for r in evals:
         codes = {c for (_sev, src, c) in r.reasons if src == "safety"}
         assert r.status == "BLOCKED" and {"book_not_valid", "market_data_not_ok"} <= codes, r
+
+
+# ---------------------------------------------------------------------------
+# D2.7: historical contract identity vs current live contract identity
+# ---------------------------------------------------------------------------
+
+def test_warm_started_contract_is_historical_until_the_live_process_defines_it(tmp_path):
+    eng = _engine()
+    _warm(tmp_path, "clean", eng, now_mono_ns=50_000 * MS)
+    inst = eng.instruments[1]
+    assert inst.contract_state == "historical" and inst.historical_con_id == 770561201
+    assert "contract:historical" in _reasons(eng)
+    _live(eng, mono0=10**15)                                    # same conId resolved live
+    assert inst.contract_state == "defined" and _reasons(eng) == []
+
+
+def test_live_contract_identity_mismatch_fails_closed(tmp_path):
+    from hermes.market.engine import ALERT_CONTRACT_IDENTITY_MISMATCH
+    from tests.support import CONTRACT
+    eng = _engine()
+    _warm(tmp_path, "clean", eng, now_mono_ns=50_000 * MS)
+    s = RawScript(mono0=10**15, wall0=T0_WALL + 3600 * 10**9)
+    s.control("connect_attempt")
+    s.next_valid_id()
+    s.request("reqContractDetails", CONTRACT, **dict(SPEC.to_params()))
+    s.contract_details(con_id=999999999, local_symbol="MNQH7")      # NOT the contract of the history
+    s.contract_end()
+    s.request("reqMarketRule", None, rule_id=67)
+    s.market_rule()
+    s.subscribe()
+    s.seed_book()
+    s.advance(600).tick()
+    n = Normalizer()
+    for raw in s.events:
+        for ev in n.normalize(raw):
+            eng.on_event(ev)
+    inst = eng.instruments[1]
+    assert ALERT_CONTRACT_IDENTITY_MISMATCH in eng.alerts
+    detail = eng.alerts[ALERT_CONTRACT_IDENTITY_MISMATCH]
+    assert "999999999" in detail and "770561201" in detail
+    assert inst.contract_state == "failed"                         # never re-defined by the instrument event
+    r = _reasons(eng)
+    assert "contract:failed" in r and f"alert:{ALERT_CONTRACT_IDENTITY_MISMATCH}" in r
+    assert not eng.snapshot().instrument(1).market_data_ok
+
+
+def test_cold_start_has_no_historical_identity():
+    from tests.support import Harness
+    s = RawScript().bootstrap().seed_book()
+    s.advance(600).tick()
+    h = Harness().run(s)
+    inst = h.engine.instruments[1]
+    assert inst.historical_con_id is None and inst.contract_state == "defined"
+    assert h.engine.snapshot().instrument(1).market_data_ok

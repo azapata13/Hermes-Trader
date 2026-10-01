@@ -77,6 +77,7 @@ ALERT_READONLY_REJECTED = "tws_readonly_rejection"
 ALERT_DEPTH_RESYNC_EXHAUSTED = "depth_resync_budget_exhausted"
 ALERT_INTERNAL_ERROR = "internal_error"
 ALERT_READONLY_VIOLATION = "readonly_violation"
+ALERT_CONTRACT_IDENTITY_MISMATCH = "contract_identity_mismatch"
 
 
 def _units_per_point(grid: PriceGrid | None) -> int | None:
@@ -132,6 +133,11 @@ class InstrumentState:
     classifier: TradeClassifier | None = None
     bars: BarEngine | None = None
     sessions: SessionTracker | None = None
+    # D2.7: identity of the contract the warm-start HISTORY was built on (None on a cold start).
+    # The live process must resolve the same conId, otherwise the contract fails closed.
+    historical_con_id: int | None = None
+    historical_local_symbol: str = ""
+    identity_mismatch: bool = False
 
 
 class MarketEngine:
@@ -229,9 +235,24 @@ class MarketEngine:
 
     def _on_contract_resolved(self, ev: M.ContractResolvedEvent) -> None:
         inst = self.instrument(ev.instrument_id)
+        if self._identity_mismatch(inst, ev.con_id, ev.local_symbol):
+            return
         inst.con_id = ev.con_id
         inst.local_symbol = ev.local_symbol
         inst.contract_state = "resolved"
+
+    def _identity_mismatch(self, inst: InstrumentState, con_id: int, local_symbol: str) -> bool:
+        """D2.7 fail closed: the live contract must be the contract of the warm-start history."""
+        if inst.identity_mismatch:
+            return True
+        if inst.historical_con_id is None or con_id == inst.historical_con_id:
+            return False
+        inst.identity_mismatch = True
+        inst.contract_state = "failed"
+        self._alert(ALERT_CONTRACT_IDENTITY_MISMATCH,
+                    f"live conId {con_id} ({local_symbol}) != warm-start history conId "
+                    f"{inst.historical_con_id} ({inst.historical_local_symbol}); contract refused")
+        return True
 
     def _on_contract_failed(self, ev: M.ContractFailedEvent) -> None:
         inst = self.instrument(ev.instrument_id)
@@ -240,6 +261,8 @@ class MarketEngine:
 
     def _on_instrument(self, ev: M.InstrumentDefinitionEvent) -> None:
         inst = self.instrument(ev.instrument_id)
+        if self._identity_mismatch(inst, ev.con_id, ev.local_symbol):
+            return
         inst.grid = ev.price_grid  # type: ignore[assignment]
         inst.con_id = ev.con_id
         inst.local_symbol = ev.local_symbol
@@ -680,8 +703,8 @@ class MarketEngine:
         for a live subscription before the new session has subscribed anything.
 
         Afterwards health equals a freshly started engine: no alerts, fresh 10197 budget, no
-        farm / not-live / resubscribe flags, every stream unsubscribed and every book invalidated
-        (DISCONNECT). Alerts raised by the NEW live session are handled exactly as before. Returns
+        farm / not-live / resubscribe flags, every stream unsubscribed, every book invalidated
+        (DISCONNECT) and the contract HISTORICAL until the live process resolves the same conId (D2.7). Alerts raised by the NEW live session are handled exactly as before. Returns
         the replayed alerts so the caller reports them as historical; nothing is silently dropped.
         """
         historical = dict(self.alerts)
@@ -696,6 +719,11 @@ class MarketEngine:
         self._resubscribe_all_seq = -1
         self._invalidate_books(InvalidationReason.DISCONNECT, now_mono_ns)
         for inst in self.instruments.values():
+            if inst.con_id is not None and inst.contract_state in ("resolved", "defined"):
+                # the replayed contract is HISTORICAL identity; only the live process may define it
+                inst.historical_con_id = inst.con_id
+                inst.historical_local_symbol = inst.local_symbol
+                inst.contract_state = "historical"
             inst.market_data_type = None
             inst.mdt_generation = None
             for st in inst.streams.values():
