@@ -121,9 +121,10 @@ def _analyze_luna(p: ApprovalPayload, path: Path) -> str:
                         "You have NO execution authority. Review the TWS screenshot "
                         "and compare it with the deterministic proposal below.\n\n"
                         + _proposal_text(p)
-                        + "\n\nReturn no more than 5 short lines:\n"
-                        "VISUAL:\nALIGNMENT:\nCONFLICT:\nDATA QUALITY:\nNOTE:\n"
-                        "Use UNKNOWN when something cannot be verified visually."
+                        + "\n\nReturn at most 2 short lines, only if useful, exactly in this form:\n"
+                        "ALIGNMENT: <what on screen supports the proposal>\n"
+                        "CONFLICT: <what on screen contradicts it, or NONE>\n"
+                        "Do not repeat the proposal. Use UNKNOWN when something cannot be verified visually."
                     ),
                 },
                 {
@@ -136,6 +137,40 @@ def _analyze_luna(p: ApprovalPayload, path: Path) -> str:
     )
 
     return response.output_text.strip()
+
+
+_MAX_NOTE_CHARS = 160
+
+
+def luna_lines(text: str | None) -> list[str]:
+    """Keep only useful ALIGNMENT / CONFLICT lines (max 2); drop empty / NONE / UNKNOWN-only lines."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        t = line.strip().lstrip("-•* ").strip()
+        key, _, val = t.partition(":")
+        if key.strip().upper() not in ("ALIGNMENT", "CONFLICT"):
+            continue
+        v = val.strip()
+        if not v or v.upper().rstrip(".") in ("NONE", "UNKNOWN", "N/A"):
+            continue
+        out.append(f"{key.strip().upper()}: {v[:_MAX_NOTE_CHARS]}")
+    return out[:2]
+
+
+def sol_lines(text: str | None) -> list[str]:
+    """Sol is shown only when it reports a significant conflict/problem (anything but NONE)."""
+    t = (text or "").strip()
+    if not t or t.upper().rstrip(".") == "NONE":
+        return []
+    return [line.strip()[:_MAX_NOTE_CHARS] for line in t.splitlines() if line.strip()][:2]
+
+
+def screenshot_caption(p: ApprovalPayload, luna_text: str | None = None, sol_text: str | None = None) -> str:
+    entry = "-" if p.entry_reference is None or not p.units_per_point else f"{p.entry_reference / p.units_per_point:.2f}"
+    lines = [f"📸 TWS · {p.symbol} {p.direction} @ {entry}"]
+    lines += [f"🧠 {x}" for x in luna_lines(luna_text)]
+    lines += [f"🧭 {x}" for x in sol_lines(sol_text)]
+    return "\n".join(lines)
 
 
 def _needs_sol(p: ApprovalPayload) -> bool:
@@ -164,7 +199,9 @@ def _analyze_sol(p: ApprovalPayload, luna_text: str) -> str:
             "Review the deterministic proposal and Luna's visual observation. "
             "Identify contradictions, uncertainty, regime conflict, or data-quality "
             "concerns. Do not tell the human to ENTER or REJECT. "
-            "Maximum 4 short lines.\n\n"
+            "If there is NO significant conflict or problem, reply exactly NONE. "
+            "Otherwise reply with at most 2 short lines naming only the conflict/problem; "
+            "do not repeat the proposal.\n\n"
             f"Proposal:\n{_proposal_text(p)}\n\n"
             f"Luna:\n{luna_text}"
         ),
@@ -271,22 +308,11 @@ class VisualEnrichmentWorker:
                 if _enabled("HERMES_SOL_ON_COMPLEX", "1") and _needs_sol(p):
                     sol_text = _analyze_sol(p, luna_text)
 
-            lines = [
-                "📸 *Hermès automatic TWS capture*",
-                "Informational only — deterministic safety remains authoritative.",
-            ]
-
-            if luna_text:
-                lines.extend(["", "🧠 *Luna*", luna_text])
-
-            if sol_text:
-                lines.extend(["", "🧭 *Sol*", sol_text])
-
             self.transport.upload_file(
                 ref,
                 str(path),
                 title=f"Hermès {p.symbol} {p.direction}",
-                initial_comment="\n".join(lines),
+                initial_comment=screenshot_caption(p, luna_text, sol_text),
             )
 
             self.completed += 1

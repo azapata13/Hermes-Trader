@@ -1,50 +1,32 @@
-"""Deterministic Slack Block Kit rendering for Hermès approval payloads.
+"""Deterministic, trader-facing Slack Block Kit rendering of a Hermès approval payload.
 
-Rendering is pure: no Slack SDK import, no network and no decision-state mutation.
+Built to be read in 5–10 seconds: direction, entry, stop/risk, 5m/1m/30s, VWAP, volume intensity,
+buyer/seller dominance, tape/DOM confirmation, at most 3 reasons, decisional warnings only,
+historical stats only when truly backed by recorded data, and ENTER / REJECT.
+
+No internal ids, reason codes, evaluation metadata, take-profit or data-feed caveats are shown:
+the complete technical view stays in the decision journal, the approval journal and the logs.
+The button values still carry the compact setup / proposal / view ids (not visible) so every click
+is verified against the exact view that was displayed. Rendering is pure: no Slack SDK import, no
+network and no decision-state mutation.
 """
 
 from __future__ import annotations
 
 import json
 
-from hermes.decision.approval import ApprovalPayload, TimeframeSummary
-from hermes.decision.reasons import Severity
+from hermes.decision.approval import ApprovalPayload
 from hermes.slack.protocol import (
     ENTER_ACTION_ID,
     REJECT_ACTION_ID,
     SlackMessage,
     SlackWorkflowState,
 )
+from hermes.slack.summary import HistoryStat, hold_reason, summarize
 
 
 def _esc(value: object) -> str:
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _short(value: str) -> str:
-    return value if len(value) <= 13 else value[:9] + "…" + value[-3:]
-
-
-def _clip(value: object, limit: int = 300) -> str:
-    text = _esc(value)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _px(units: int | None, units_per_point: int | None) -> str:
-    if units is None:
-        return "-"
-    if not units_per_point:
-        return f"{units} units"
-    return f"{units / units_per_point:.2f}"
-
-
-def _tf(t: TimeframeSummary) -> str:
-    net = "-" if t.net_change_units is None else f"{t.net_change_units:+d} ticks"
-    return (
-        f"*{_esc(t.stage)}* `{_esc(t.result)}` · bars {t.bars_used} · "
-        f"net {net} · Δ {_esc(t.known_delta):s} · "
-        f"B/S/U {t.buy_volume}/{t.sell_volume}/{t.unknown_volume}"
-    )
 
 
 def _action_value(p: ApprovalPayload) -> str:
@@ -56,31 +38,31 @@ def _action_value(p: ApprovalPayload) -> str:
     )
 
 
-def _reason_text(p: ApprovalPayload, severity: Severity, limit: int = 8) -> str:
-    rows = [r for r in p.reasons if r.severity is severity]
-    if not rows:
-        return "none"
-    out = []
-    for r in rows[:limit]:
-        detail = f" — {_clip(r.detail, 280)}" if r.detail else ""
-        out.append(f"• `{_esc(r.source)}/{_esc(r.code)}`{detail}")
-    if len(rows) > limit:
-        out.append(f"• … +{len(rows) - limit} more")
-    return "\n".join(out)
+def _section(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
-def _orderflow_text(p: ApprovalPayload, role: str, limit: int = 6) -> str:
-    rows = [c for c in p.orderflow_evidence if c.role == role]
-    if not rows:
-        return "none"
-    out = []
-    for c in rows[:limit]:
-        out.append(
-            f"• `{_esc(c.name)}` {c.window_s}s → *{_esc(c.vote.value)}* — {_clip(c.detail, 360)}"
-        )
-    if len(rows) > limit:
-        out.append(f"• … +{len(rows) - limit} more")
-    return "\n".join(out)
+def _status_line(p: ApprovalPayload, state: SlackWorkflowState, banner: str | None) -> str | None:
+    """One line, only when the proposal is NOT simply open and approvable."""
+    if state is SlackWorkflowState.ACTIVE and p.status == "ACTIONABLE" and p.approval_allowed_now and not banner:
+        return None
+    icon = {
+        SlackWorkflowState.ACTIVE: "🔄",
+        SlackWorkflowState.HOLD: "⏸",
+        SlackWorkflowState.ENTER_RECORDED: "✅",
+        SlackWorkflowState.REJECTED: "⛔",
+        SlackWorkflowState.CLOSED: "🔒",
+    }[state]
+    if banner:
+        text = banner
+    elif p.status != "ACTIONABLE":
+        text = f"{p.status.title()} — proposal ended, ENTER disabled."
+    else:
+        text = "Not approvable right now — ENTER unavailable."
+    reason = hold_reason(p)
+    if reason and (state is SlackWorkflowState.HOLD or not p.approval_allowed_now) and p.status == "ACTIONABLE":
+        text = f"{text} ({reason})"
+    return f"{icon} {_esc(text)}"
 
 
 def render_slack_message(
@@ -88,172 +70,61 @@ def render_slack_message(
     *,
     workflow_state: SlackWorkflowState = SlackWorkflowState.ACTIVE,
     banner: str | None = None,
+    history: HistoryStat | None = None,
 ) -> SlackMessage:
-    """Render the exact approval view that the human is being shown.
+    """Render the exact approval view the human is shown.
 
-    Slack has no disabled-button state.  Therefore ENTER is omitted whenever
-    ``approval_allowed_now`` is false; REJECT remains available while the human
-    workflow is open.
+    Slack has no disabled-button state: ENTER is omitted whenever ``approval_allowed_now`` is false;
+    REJECT remains available while the human workflow is open.
     """
-
-    upp = p.units_per_point
-    remaining = "-"
-    if p.expires_at_ns is not None and p.safety_evaluated_wall_ns is not None:
-        remaining = f"{max(0, (p.expires_at_ns - p.safety_evaluated_wall_ns) // 1_000_000_000)} s"
-
-    open_workflow = workflow_state in (SlackWorkflowState.ACTIVE, SlackWorkflowState.HOLD)
-    status_icon = {
-        SlackWorkflowState.ACTIVE: "🟢",
-        SlackWorkflowState.HOLD: "🟡",
-        SlackWorkflowState.ENTER_RECORDED: "✅",
-        SlackWorkflowState.REJECTED: "⛔",
-        SlackWorkflowState.CLOSED: "🔒",
-    }[workflow_state]
-
+    s = summarize(p, history)
+    top = f"*{_esc(s.headline)}*\n{_esc(s.risk)}"
+    status = _status_line(p, workflow_state, banner)
+    if status:
+        top += f"\n{status}"
     blocks: list[dict] = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"Hermès · {p.symbol} {p.direction} · HUMAN_APPROVAL",
-                "emoji": True,
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"{status_icon} *{workflow_state.value}* · lifecycle `{_esc(p.status)}` · "
-                    f"approval now *{'YES' if p.approval_allowed_now else 'NO'}*\n"
-                    f"`setup {_short(p.setup_id)}` · `proposal {_short(p.proposal_id)}` · "
-                    f"`view {_short(p.approval_view_id)}`"
-                ),
-            },
-        },
+        _section(top),
+        _section("\n".join(_esc(x) for x in (s.timeframes, s.context, s.confirmation))),
     ]
-    if banner:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{_esc(banner)}*"}}
-        )
+    if s.reasons:
+        blocks.append(_section("\n".join(f"{i}) {_esc(r)}" for i, r in enumerate(s.reasons, 1))))
+    if s.warnings:
+        blocks.append(_section("\n".join(_esc(w) for w in s.warnings)))
+    if s.history:
+        blocks.append(_section(_esc(s.history)))
 
-    blocks += [
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Entry*\n{_px(p.entry_reference, upp)} ({_esc(p.entry_side or '-')})"},
-                {"type": "mrkdwn", "text": f"*Stop*\n{_px(p.proposed_stop, upp)}"},
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Risk / contract*\n"
-                        f"{'-' if p.risk_points is None else f'{p.risk_points:.2f} pt'} · "
-                        f"{'-' if p.risk_usd_per_contract is None else f'${p.risk_usd_per_contract:.2f}'}"
-                    ),
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Invalidation*\n{_px(p.structural_invalidation, upp)} "
-                        f"({_esc(p.structure_source or '-')})"
-                    ),
-                },
-                {"type": "mrkdwn", "text": f"*Expires*\n{remaining}"},
-                {"type": "mrkdwn", "text": "*Take-profit*\nNONE"},
-            ],
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*5m / 1m / 30s*\n"
-                + "\n".join(_tf(t) for t in (p.regime_5m, p.setup_1m, p.trigger_30s)),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*PRIMARY order flow*\n" + _orderflow_text(p, "primary"),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Secondary / contextual order flow*\n" + _orderflow_text(p, "secondary"),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*BLOCKERS*\n" + _reason_text(p, Severity.BLOCK),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*TEMPORARY HOLDS*\n" + _reason_text(p, Severity.HOLD),
-            },
-        },
-    ]
-
-    cautions = _reason_text(p, Severity.CAUTION)
-    supports = _reason_text(p, Severity.SUPPORT)
-    if cautions != "none":
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*CAUTIONS*\n" + cautions}})
-    if supports != "none":
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "*SUPPORTING EVIDENCE*\n" + supports}}
-        )
-
-    if p.notes:
-        notes = "\n".join(f"• {_clip(n, 360)}" for n in p.notes[:6])
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "*IBKR MBP limitations*\n" + notes}}
-        )
-
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Hermès sends *no order*. ENTER is human intent only; fresh safety is re-checked.",
-                }
-            ],
-        }
-    )
-
-    if open_workflow:
+    if workflow_state in (SlackWorkflowState.ACTIVE, SlackWorkflowState.HOLD):
         elements = []
         if p.status == "ACTIONABLE" and p.approval_allowed_now:
-            elements.append(
-                {
-                    "type": "button",
-                    "action_id": ENTER_ACTION_ID,
-                    "text": {"type": "plain_text", "text": "ENTER", "emoji": True},
-                    "style": "primary",
-                    "value": _action_value(p),
-                }
-            )
-        elements.append(
-            {
+            elements.append({
                 "type": "button",
-                "action_id": REJECT_ACTION_ID,
-                "text": {"type": "plain_text", "text": "REJECT", "emoji": True},
-                "style": "danger",
+                "action_id": ENTER_ACTION_ID,
+                "text": {"type": "plain_text", "text": "ENTER", "emoji": True},
+                "style": "primary",
                 "value": _action_value(p),
-            }
-        )
+            })
+        elements.append({
+            "type": "button",
+            "action_id": REJECT_ACTION_ID,
+            "text": {"type": "plain_text", "text": "REJECT", "emoji": True},
+            "style": "danger",
+            "value": _action_value(p),
+        })
         blocks.append({"type": "actions", "elements": elements})
 
-    fallback = (
-        f"Hermès {p.symbol} {p.direction}: {workflow_state.value}; "
-        f"status={p.status}; approval={'YES' if p.approval_allowed_now else 'NO'}; "
-        "Hermès sends no order."
-    )
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _esc(s.footer)}]})
+    fallback = f"{s.headline} · {s.risk}" + (f" · {status}" if status else "") + " · Intent only — no order sent"
     return SlackMessage(fallback, tuple(blocks))
+
+
+def render_text(message: SlackMessage) -> str:
+    """Plain-text view of a rendered message (tests / logs): what the trader actually reads."""
+    out: list[str] = []
+    for b in message.blocks:
+        if b["type"] == "section":
+            out.append(b["text"]["text"])
+        elif b["type"] == "context":
+            out.extend(e["text"] for e in b["elements"])
+        elif b["type"] == "actions":
+            out.append("  ".join(f"[ {e['text']['text']} ]" for e in b["elements"]))
+    return "\n\n".join(out)

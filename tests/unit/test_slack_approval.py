@@ -19,7 +19,7 @@ from hermes.slack.protocol import (
     SlackAction,
     SlackInteraction,
 )
-from hermes.slack.render import render_slack_message
+from hermes.slack.render import render_slack_message, render_text
 from hermes.slack.socket_mode import SlackConfigError, SlackSettings
 from tests.support import DEPTH, TICK
 from tests.unit.test_candidate import S, T0
@@ -112,17 +112,18 @@ def test_slack_settings_are_optional_but_partial_config_fails_closed():
         raise AssertionError("partial Slack config was silently accepted")
 
 
-def test_render_actionable_contains_compact_ids_and_enter_reject():
+def test_render_actionable_is_concise_and_buttons_carry_compact_ids():
     lv, rec = started()
     p = current_approval_payload(lv.h.engine, rec, now_wall_ns=NOW)
     msg = render_slack_message(p)
     assert _action_ids(msg) == [ENTER_ACTION_ID, REJECT_ACTION_ID]
     value = _action_value(msg, ENTER_ACTION_ID)
     assert value == {"s": p.setup_id, "p": p.proposal_id, "v": p.approval_view_id}
-    wire = json.dumps(msg.blocks, ensure_ascii=False)
-    assert "Take-profit" in wire and "Hermès sends" in wire
-    assert p.proposal_id in wire and p.approval_view_id in wire
-    assert "confidence" not in wire.lower()
+    visible = render_text(msg)                                   # what the trader reads (not button values)
+    assert "Intent only — no order sent" in visible
+    for hidden in (p.setup_id, p.proposal_id, p.approval_view_id, "Take-profit", "market-by-price", "MBP"):
+        assert hidden not in visible
+    assert "confidence" not in json.dumps(msg.blocks, ensure_ascii=False).lower()
 
 
 def test_temporary_hold_removes_enter_and_same_message_is_updated():
