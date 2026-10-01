@@ -6,9 +6,9 @@ thread only appends an immutable entry to memory and enqueues one JSON line.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
 import logging
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from queue import Queue
 from threading import Lock, Thread

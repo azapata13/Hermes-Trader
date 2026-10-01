@@ -12,13 +12,13 @@ Required:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
 import os
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from hermes.slack.chat import SlackMention
 from hermes.slack.protocol import (
@@ -45,7 +45,7 @@ class SlackSettings:
     channel_id: str
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "SlackSettings | None":
+    def from_env(cls, env: Mapping[str, str] | None = None) -> SlackSettings | None:
         env = os.environ if env is None else env
         names = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "HERMES_SLACK_CHANNEL_ID")
         vals = {name: (env.get(name) or "").strip() for name in names}
@@ -83,7 +83,7 @@ def _wall_ns(action_ts: object) -> int | None:
 
 def _parse_value(value: object) -> tuple[str, str, str]:
     if not isinstance(value, str):
-        raise ValueError("Slack action value is not a string")
+        raise ValueError("Slack action value is not a string")  # noqa: TRY004 - all malformed values rejected alike
     obj = json.loads(value)
     if not isinstance(obj, dict) or set(obj) != {"s", "p", "v"}:
         raise ValueError("Slack action value has an unexpected shape")

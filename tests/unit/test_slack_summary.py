@@ -13,9 +13,15 @@ from hermes.decision.reasons import Reason, Severity
 from hermes.slack.enrichment import luna_lines, screenshot_caption, sol_lines
 from hermes.slack.protocol import ENTER_ACTION_ID, REJECT_ACTION_ID, SlackWorkflowState
 from hermes.slack.render import render_slack_message, render_text
-from hermes.slack.summary import HISTORY_MIN_SAMPLES, HistoryStat, dominance, summarize, volume_intensity
+from hermes.slack.summary import (
+    HISTORY_MIN_SAMPLES,
+    HistoryStat,
+    dominance,
+    summarize,
+    volume_intensity,
+)
 from tests.support import DEPTH, TICK
-from tests.unit.test_candidate import S, T0, trend
+from tests.unit.test_candidate import T0, S, trend
 from tests.unit.test_lifecycle import Live, started
 
 NOW = (T0 + 605) * S

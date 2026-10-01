@@ -65,7 +65,7 @@ def test_policy_accepts_no_override_input():
 # ============================================================================ healthy baseline
 
 def test_healthy_state_is_allowed(base):
-    _, _, ctx, f = base
+    _, _, _ctx, f = base
     r = ev(f)
     assert r.allowed and not r.hard_block_reasons and not r.temporary_hold_reasons
     assert r.session_policy.authorized and r.session_policy.policy == "RTH_ONLY"

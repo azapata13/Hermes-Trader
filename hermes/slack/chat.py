@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 import json
 import logging
 import os
 import re
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
-from typing import Callable
 
 from hermes.slack.enrichment import _capture_tws, _image_url
 
@@ -160,7 +160,7 @@ class ConversationalWorker:
         status: str,
     ) -> None:
         row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": status,
             "channel_id": mention.channel_id,
             "user_id": mention.user_id,
@@ -175,7 +175,7 @@ class ConversationalWorker:
         try:
             with self._journal.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort journal; never break the Slack worker
             log.warning("could not write Slack conversation journal: %s", exc)
 
     def _run(self) -> None:
@@ -246,7 +246,7 @@ class ConversationalWorker:
                 else:
                     screenshot = None
 
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - screenshot is optional; answer without it
                 self.capture_failures += 1
                 screenshot = None
 
@@ -351,10 +351,7 @@ Answer the question directly.
         except Exception as exc:
             self.failures += 1
 
-            log.exception(
-                "Hermès conversational response failed: %s",
-                exc,
-            )
+            log.exception("Hermès conversational response failed")
 
             self._write_journal(
                 mention,
@@ -371,4 +368,4 @@ Answer the question directly.
                     f"⚠️ Hermès conversation error: `{type(exc).__name__}`",
                 )
             except Exception:
-                pass
+                log.warning("could not post the conversation error notice to Slack", exc_info=True)

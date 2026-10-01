@@ -207,7 +207,7 @@ def test_pipeline_never_raises_into_ibapi_and_fails_safe():
 
 
 def test_engine_cannot_be_written_outside_pipeline():
-    p, eng, _ = pipeline()
+    _p, eng, _ = pipeline()
     from hermes.market import events as M
     with pytest.raises(SingleWriterViolation):
         eng.on_event(M.HeartbeatEvent(seq=1, instrument_id=0, recv_mono_ns=1, recv_wall_ns=1, tws_time_s=1))

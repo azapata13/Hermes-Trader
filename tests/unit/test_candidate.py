@@ -102,7 +102,7 @@ def short_run():
 # ============================================================================ LONG / SHORT
 
 def test_long_candidate_is_fully_explained(long_run):
-    h, ce, out = long_run
+    _h, _ce, out = long_run
     c, snap = first(out, Direction.LONG)
     assert c.regime_5m.result == "LONG" and c.setup_1m.result == "LONG" and c.trigger_30s.result == "LONG"
     assert c.blocking_reasons == () and c.is_actionable_proposal and c.mode == "HUMAN_APPROVAL"
@@ -126,7 +126,7 @@ def test_long_candidate_is_fully_explained(long_run):
 
 
 def test_short_candidate_is_the_exact_inverse(short_run):
-    h, ce, out = short_run
+    _h, ce, out = short_run
     c, snap = first(out, Direction.SHORT)
     book = snap.instruments[0].book
     assert c.regime_5m.result == "SHORT" and c.blocking_reasons == ()
@@ -147,7 +147,7 @@ def test_evaluates_only_once_per_completed_30s_bar(long_run):
 
 
 def test_regime_needs_full_completed_5m_lookback(long_run):
-    h, ce, out = long_run
+    _h, _ce, out = long_run
     early = [c for c, _ in out if c.trigger_bar_end_s - T0 < 600]
     assert early and all(c.direction is Direction.NONE for c in early)
     assert all("regime_5m_neutral" in c.blocking_reasons for c in early)
@@ -163,7 +163,7 @@ def test_flat_market_is_neutral_none():
 
 
 def test_outside_rth_is_none_with_explicit_reason():
-    _, ce, out = run(trend(+1, t0=PRE_RTH))
+    _, _ce, out = run(trend(+1, t0=PRE_RTH))
     assert out and all(c.direction is Direction.NONE for c, _ in out)
     c = out[-1][0]
     assert any(r.startswith("safety:outside_authorized_entry_hours") for r in c.blocking_reasons) and not c.session_rth
@@ -375,7 +375,7 @@ def test_structure_beyond_twelve_points_is_none_never_a_capped_stop(long_ctx):
 def test_deep_swing_in_real_flow_blocks():
     # one print 60 ticks against the trend inside the swing window -> structure needs > 12 pt
     sc = trend(+1, dip=(560.0, 60))
-    _, ce, out = run(sc)
+    _, _ce, out = run(sc)
     after = [c for c, _ in out if 570 <= c.trigger_bar_end_s - T0 <= 690]
     assert any(any(r.startswith("structural stop exceeds maximum risk") for r in c.blocking_reasons) for c in after)
     assert all(c.direction is Direction.NONE or c.risk_points <= 12 for c, _ in out)

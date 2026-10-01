@@ -297,8 +297,8 @@ class LiveRuntime:
                             now_wall_ns=r.wall_ns,
                             instrument_id=rec.candidate.instrument_id,
                         )
-                    except Exception as exc:  # noqa: BLE001 - Slack must never stop market processing
-                        log.exception("could not build Slack approval view: %s", exc)
+                    except Exception:  # Slack must never stop market processing
+                        log.exception("could not build Slack approval view")
             bridge.publish_decision(r, slack_view)
 
     def _save_checkpoints(self) -> None:

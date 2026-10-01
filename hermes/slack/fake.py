@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from threading import Lock
 import time
+from threading import Lock
 
 from hermes.slack.protocol import (
     InteractionHandler,

@@ -13,8 +13,8 @@ ENTER is human intent only.  There is no broker import and no execution path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from queue import Empty, Full, Queue, SimpleQueue
 from threading import Lock, Thread
 
@@ -26,9 +26,9 @@ from hermes.decision.response import (
     response_matches_view,
 )
 from hermes.decision.runtime import JournalKind, JournalRecord
-from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
-from hermes.slack.enrichment import VisualEnrichmentWorker
 from hermes.slack.chat import ConversationalWorker
+from hermes.slack.enrichment import VisualEnrichmentWorker
+from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
 from hermes.slack.protocol import (
     SlackAction,
     SlackInteraction,
@@ -144,7 +144,8 @@ class SlackApprovalBridge:
         self.enrichment = VisualEnrichmentWorker(transport)
 
         if market_context_provider is None:
-            market_context_provider = lambda: "Hermès market context unavailable."
+            def market_context_provider() -> str:
+                return "Hermès market context unavailable."
 
         self.chat = ConversationalWorker(
             transport,
@@ -231,7 +232,7 @@ class SlackApprovalBridge:
         self.stats.interactions_received += 1
         self._inbox.put(interaction)
 
-    def after_event(self, raw, events, now_mono_ns: int) -> None:  # noqa: ARG002
+    def after_event(self, raw, events, now_mono_ns: int) -> None:
         """Drain a bounded number of Slack intents on the single-writer dispatch thread."""
         for _ in range(self.max_interactions_per_event):
             try:
@@ -269,9 +270,9 @@ class SlackApprovalBridge:
                     now_wall_ns=raw.recv_wall_ns,
                     instrument_id=rec.candidate.instrument_id,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:
                 codes.append("current_approval_view_failed")
-                log.exception("could not build fresh approval view for Slack interaction: %s", exc)
+                log.exception("could not build fresh approval view for Slack interaction")
 
         try:
             response = HumanApprovalResponse(

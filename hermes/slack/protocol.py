@@ -9,10 +9,10 @@ Slack click is human intent data; it can never authorize broker execution.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Protocol
-
+from typing import Protocol
 
 ENTER_ACTION_ID = "hermes_enter"
 REJECT_ACTION_ID = "hermes_reject"

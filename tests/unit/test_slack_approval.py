@@ -22,7 +22,7 @@ from hermes.slack.protocol import (
 from hermes.slack.render import render_slack_message, render_text
 from hermes.slack.socket_mode import SlackConfigError, SlackSettings
 from tests.support import DEPTH, TICK
-from tests.unit.test_candidate import S, T0
+from tests.unit.test_candidate import T0, S
 from tests.unit.test_lifecycle import started
 
 NOW = (T0 + 605) * S
@@ -318,7 +318,7 @@ def test_update_failure_keeps_last_confirmed_displayed_view():
 
 
 def test_enter_after_expiry_fails_closed():
-    lv, rec = started()
+    lv, _rec = started()
     bridge, fake = _bridge(lv)
     try:
         _, _ = _post_initial(lv, bridge, fake)
@@ -345,7 +345,7 @@ def test_enter_after_expiry_fails_closed():
 
 
 def test_enter_after_safety_block_fails_closed():
-    lv, rec = started()
+    lv, _rec = started()
     bridge, fake = _bridge(lv)
     try:
         _, _ = _post_initial(lv, bridge, fake)
@@ -374,7 +374,7 @@ def test_enter_after_safety_block_fails_closed():
 
 
 def test_unknown_proposal_id_fails_closed_and_is_audited():
-    lv, rec = started()
+    lv, _rec = started()
     bridge, fake = _bridge(lv)
     try:
         _, p = _post_initial(lv, bridge, fake)

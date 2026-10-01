@@ -392,17 +392,17 @@ class StructureEngine:
     def _current_levels(self) -> tuple[LevelPersistence, ...]:
         return tuple(
             LevelPersistence(
-                side=l.side,
-                price_units=l.price_units,
-                size=l.size,
-                age_ns=max(0, self._now_ns - l.first_seen_ns),
-                peak_size=l.peak_size,
-                visible_additions=l.visible_additions,
-                visible_removals=l.visible_removals,
-                replenishment_events=l.replenishment_events,
-                replenished_volume=l.replenished_volume,
+                side=lv.side,
+                price_units=lv.price_units,
+                size=lv.size,
+                age_ns=max(0, self._now_ns - lv.first_seen_ns),
+                peak_size=lv.peak_size,
+                visible_additions=lv.visible_additions,
+                visible_removals=lv.visible_removals,
+                replenishment_events=lv.replenishment_events,
+                replenished_volume=lv.replenished_volume,
             )
-            for l in sorted(
+            for lv in sorted(
                 self._levels.values(),
                 key=lambda x: (x.side.value, -x.price_units if x.side is BookSide.BID else x.price_units),
             )

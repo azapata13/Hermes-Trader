@@ -30,12 +30,12 @@ from enum import Enum
 from hermes.decision.candidate import Assessment, OrderFlowComponent
 from hermes.decision.lifecycle import CandidateRecord, CandidateStatus
 from hermes.decision.reasons import SRC_APPROVAL, SRC_LIFECYCLE, Reason, Severity, codes, ordered
-
-AFTER_CREATION_SOURCES = frozenset({SRC_APPROVAL, SRC_LIFECYCLE})
 from hermes.decision.safety import (
     CANDIDATE_STATUS_NOT_ACTIONABLE, HOLD_CODES, PURPOSE_APPROVAL, SafetyResult, approval_check)
 from hermes.market.bars import Bar
 from hermes.replay.fingerprint import digest
+
+AFTER_CREATION_SOURCES = frozenset({SRC_APPROVAL, SRC_LIFECYCLE})
 
 APPROVAL_SCHEMA_VERSION = 3
 

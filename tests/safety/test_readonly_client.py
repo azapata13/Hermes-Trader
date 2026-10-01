@@ -219,7 +219,7 @@ def test_unbound_base_class_order_calls_are_blocked(server_version):
     Note: on legacy (text) server versions ibapi catches the exception inside the request
     body and reports it via EWrapper.error — hence the latch requirement.
     """
-    client, fake, wrapper = connected_client(server_version)
+    client, fake, _wrapper = connected_client(server_version)
     bypasses = [
         lambda: EClient.placeOrder(client, 1, mnq(), Order()),
         lambda: EClient.cancelOrder(client, 1, OrderCancel()),

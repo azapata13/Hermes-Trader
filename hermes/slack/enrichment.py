@@ -3,9 +3,9 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import subprocess
 from pathlib import Path
 from queue import Full, Queue
-import subprocess
 from threading import Thread
 
 from hermes.decision.approval import ApprovalPayload
@@ -59,6 +59,7 @@ exit(2)
         text=True,
         capture_output=True,
         timeout=15,
+        check=False,                       # the return code is inspected just below
     )
 
     if result.returncode != 0:
@@ -317,10 +318,9 @@ class VisualEnrichmentWorker:
 
             self.completed += 1
 
-        except Exception as exc:
+        except Exception:
             self.failures += 1
             log.exception(
-                "visual enrichment failed for %s: %s",
+                "visual enrichment failed for %s",
                 p.proposal_id,
-                exc,
             )

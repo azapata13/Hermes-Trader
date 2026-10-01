@@ -67,7 +67,7 @@ def price(units: int) -> float:
 
 def test_setup_id_is_deterministic_and_clock_free():
     lv1, r1 = started()
-    lv2, r2 = started()
+    _lv2, r2 = started()
     assert r1.setup_id == r2.setup_id and r1.setup_id.startswith("S") and len(r1.setup_id) == 24
     moved = dataclasses.replace(r1.candidate, wall_ns=r1.candidate.wall_ns + 123_456_789, seq=999_999)
     assert setup_id(moved) == r1.setup_id                                  # no wall clock, no seq, no randomness
@@ -78,7 +78,7 @@ def test_setup_id_is_deterministic_and_clock_free():
 
 
 def test_initial_statuses_none_blocked_actionable():
-    lv, rec = started()
+    lv, _rec = started()
     early = [r for r in lv.lc.records if r.candidate.trigger_bar_end_s - T0 < 600]
     assert early and all(r.status is CandidateStatus.NONE for r in early)  # no setup: NONE, not BLOCKED
     assert all(r.reasons for r in early) and all(":" in r.reasons[0].code or r.reasons[0].code for r in early)

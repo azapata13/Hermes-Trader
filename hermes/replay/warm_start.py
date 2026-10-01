@@ -132,7 +132,7 @@ def warm_start_engine(
 
     try:
         src = RecordingSource(session_dir)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any unreadable recording -> cold start
         return WarmStartResult(
             False,
             f"recording unreadable: {type(exc).__name__}: {exc}",
@@ -155,7 +155,7 @@ def warm_start_engine(
     try:
         for _ in validator.events():
             pass
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any unreadable recording -> cold start
         return WarmStartResult(
             False,
             f"recording validation failed: {type(exc).__name__}: {exc}",

@@ -263,7 +263,7 @@ def test_health_disconnect_reconnect_1101_1102_10197_delayed_generations(tmp_pat
     sc.subscribe(50_001, 50_002, 50_003, 50_004)
     sc.seed_book(depth=50_001, bbo=50_002, l1=50_004)
     ticks(sc, 600)
-    r, h = check(tmp_path, sc)
+    r, _h = check(tmp_path, sc)
     e = r.engine
     assert e.conflict.recoveries == 1 and e.conflict.phase is ConflictPhase.NONE
     assert e.connection is ConnectionState.CONNECTED and not e.not_live
