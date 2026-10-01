@@ -21,7 +21,6 @@ from hermes.market.engine import ALERT_INTERNAL_ERROR, MarketEngine
 from hermes.market.snapshot import SnapshotPublisher
 from tests.support import SPEC
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -280,9 +279,9 @@ def test_adapter_callback_signatures_match_ewrapper():
 
 def test_adapter_timestamps_first_and_converts_ibapi_objects():
     from decimal import Decimal
-    from ibapi.common import TickAttribBidAsk, TickAttribLast
+
+    from ibapi.common import PriceIncrement, TickAttribBidAsk, TickAttribLast
     from ibapi.contract import ContractDetails
-    from ibapi.common import PriceIncrement
 
     p, _, rec = pipeline()
     a = IbkrAdapter(p)

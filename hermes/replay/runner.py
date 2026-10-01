@@ -28,11 +28,12 @@ import dataclasses
 import resource
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from itertools import islice
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from hermes.config import ConfigError, HermesConfig, config_from_mapping, load_config
 from hermes.decision.runtime import DecisionRuntime
@@ -50,7 +51,13 @@ from hermes.replay.checkpoints import (
 )
 from hermes.replay.clock import ReplayClock
 from hermes.replay.decisions import (
-    DECISIONS_SIDECAR, DecisionCompare, DecisionSet, compare_decisions, decision_meta, load_decisions)
+    DECISIONS_SIDECAR,
+    DecisionCompare,
+    DecisionSet,
+    compare_decisions,
+    decision_meta,
+    load_decisions,
+)
 from hermes.replay.source import Integrity, RecordingInfo, RecordingSource
 from hermes.replay.warm_start import apply_recorded_warm_start
 

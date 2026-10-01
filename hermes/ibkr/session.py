@@ -24,8 +24,8 @@ import signal
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable
 
 from ibapi.contract import Contract
 
@@ -320,7 +320,7 @@ class Heartbeat:
             if self._on_beat is not None:
                 try:
                     self._on_beat()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception("heartbeat hook failed")
             if self._gw.connected:
                 try:
@@ -403,7 +403,7 @@ class Supervisor:
         self.final_snapshot = self.p.publisher.latest()     # state before we cancel anything
         try:
             self.session.shutdown_requests()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("shutdown requests failed")
         time.sleep(self.cfg.session.shutdown_grace_s)
         client.disconnect()

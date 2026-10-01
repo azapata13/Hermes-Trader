@@ -30,9 +30,9 @@ ALLOWED_OUT = {71, 49, 59, 9, 91, 10, 11, 97, 98, 1, 2}   # startApi, time, mdt,
 
 def fast_cfg(port: int, tmp_path, **session):
     cfg = load_config()
-    s = dict(conflict_retry_interval_s=0.3, recovery_attempt_timeout_s=1.0, resync_min_interval_s=0.2,
-             reconnect_initial_backoff_s=0.2, reconnect_max_backoff_s=0.5, contract_timeout_s=3.0,
-             market_rule_timeout_s=3.0, shutdown_grace_s=0.1)
+    s = {"conflict_retry_interval_s": 0.3, "recovery_attempt_timeout_s": 1.0, "resync_min_interval_s": 0.2,
+         "reconnect_initial_backoff_s": 0.2, "reconnect_max_backoff_s": 0.5, "contract_timeout_s": 3.0,
+         "market_rule_timeout_s": 3.0, "shutdown_grace_s": 0.1}
     s.update(session)
     return dataclasses.replace(
         cfg,

@@ -84,24 +84,24 @@ def test_engine_and_context_readers_agree(base):
 # ============================================================================ each hard block
 
 @pytest.mark.parametrize("change,code", [
-    (dict(connection="lost"), "connection_unusable"),
-    (dict(contract_state="pending"), "contract_not_defined"),
-    (dict(market_data_type=3), "market_data_not_live"),
-    (dict(not_live=True), "market_data_not_live"),
-    (dict(conflict_active=True, conflict_phase="blocked"), "session_conflict_10197"),
-    (dict(alerts=("internal_error",)), "critical_alert"),
-    (dict(farm_broken=True), "farm_broken"),
-    (dict(book_state="suspect"), "book_not_valid"),
-    (dict(book_state="stale", book_coherent=False, book_coherence_reason="empty_side_transition"), "book_not_valid"),
-    (dict(bar_active_flags=8), "active_data_gap"),
-    (dict(classification_ok=False, classification_reason="bbo:requested"), "classification_context_invalid"),
-    (dict(grid_uniform=False), "price_grid_not_uniform"),
-    (dict(calendar_ok=False), "session_calendar_invalid"),
-    (dict(in_rth=False), "outside_authorized_entry_hours"),
-    (dict(market_data_ok=False, not_ok_reasons=("depth:requested",)), "market_data_not_ok"),
-    (dict(c7_available=False), "c7_metrics_unavailable"),
-    (dict(c8_structure_available=False), "c8_structure_unavailable"),
-    (dict(c8_patterns_available=False), "c8_patterns_unavailable"),
+    ({"connection": "lost"}, "connection_unusable"),
+    ({"contract_state": "pending"}, "contract_not_defined"),
+    ({"market_data_type": 3}, "market_data_not_live"),
+    ({"not_live": True}, "market_data_not_live"),
+    ({"conflict_active": True, "conflict_phase": "blocked"}, "session_conflict_10197"),
+    ({"alerts": ("internal_error",)}, "critical_alert"),
+    ({"farm_broken": True}, "farm_broken"),
+    ({"book_state": "suspect"}, "book_not_valid"),
+    ({"book_state": "stale", "book_coherent": False, "book_coherence_reason": "empty_side_transition"}, "book_not_valid"),
+    ({"bar_active_flags": 8}, "active_data_gap"),
+    ({"classification_ok": False, "classification_reason": "bbo:requested"}, "classification_context_invalid"),
+    ({"grid_uniform": False}, "price_grid_not_uniform"),
+    ({"calendar_ok": False}, "session_calendar_invalid"),
+    ({"in_rth": False}, "outside_authorized_entry_hours"),
+    ({"market_data_ok": False, "not_ok_reasons": ("depth:requested",)}, "market_data_not_ok"),
+    ({"c7_available": False}, "c7_metrics_unavailable"),
+    ({"c8_structure_available": False}, "c8_structure_unavailable"),
+    ({"c8_patterns_available": False}, "c8_patterns_unavailable"),
 ])
 def test_each_hard_block(base, change, code):
     _, _, _, f = base
@@ -254,8 +254,11 @@ def test_fresh_passing_safety_result_is_required_and_sufficient():
 
 def test_forged_or_mismatched_safety_results_are_rejected(base):
     from hermes.decision.approval import (
-        SAFETY_NOT_EVALUATED, SAFETY_RESULT_NOT_FOR_APPROVAL, SAFETY_RESULT_OTHER_CANDIDATE,
-        SAFETY_RESULT_OUTDATED)
+        SAFETY_NOT_EVALUATED,
+        SAFETY_RESULT_NOT_FOR_APPROVAL,
+        SAFETY_RESULT_OTHER_CANDIDATE,
+        SAFETY_RESULT_OUTDATED,
+    )
     lv, rec, _, f = base
     r = lv.lc.get(rec.setup_id)
     now = (T0 + 605) * S

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import random
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -29,7 +29,7 @@ F = BarFlag
 
 
 def utc(s: str) -> int:
-    return int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp())
+    return int(datetime.fromisoformat(s).replace(tzinfo=UTC).timestamp())
 
 
 T0 = utc("2026-09-22T14:00:00")          # Tuesday 09:00 CDT: inside the trading session and RTH
@@ -63,10 +63,10 @@ def direct(trades, start, end):
         return None
     buy = sum(t[2] for t in ins if t[3] is BUY)
     sell = sum(t[2] for t in ins if t[3] is SELL)
-    return dict(open=ins[0][1], high=max(t[1] for t in ins), low=min(t[1] for t in ins), close=ins[-1][1],
-                volume=sum(t[2] for t in ins), trades=len(ins), buy_volume=buy, sell_volume=sell,
-                unknown_volume=sum(t[2] for t in ins if t[3] is UNK), known_delta=buy - sell,
-                vwap_num=sum(t[1] * t[2] for t in ins), first_seq=ins[0][4], last_seq=ins[-1][4])
+    return {"open": ins[0][1], "high": max(t[1] for t in ins), "low": min(t[1] for t in ins), "close": ins[-1][1],
+            "volume": sum(t[2] for t in ins), "trades": len(ins), "buy_volume": buy, "sell_volume": sell,
+            "unknown_volume": sum(t[2] for t in ins if t[3] is UNK), "known_delta": buy - sell,
+            "vwap_num": sum(t[1] * t[2] for t in ins), "first_seq": ins[0][4], "last_seq": ins[-1][4]}
 
 
 def fields(bar: Bar) -> dict:
@@ -281,7 +281,7 @@ def test_excluded_prints_are_counted_but_never_touch_ohlc_or_volume():
 
 # ---------------------------------------------------------------------------- engine integration
 
-WEEK_CD = dict(trading_hours=WEEK, liquid_hours=WEEK_RTH, time_zone_id="US/Central")
+WEEK_CD = {"trading_hours": WEEK, "liquid_hours": WEEK_RTH, "time_zone_id": "US/Central"}
 
 
 def live_script(t0=T0) -> RawScript:

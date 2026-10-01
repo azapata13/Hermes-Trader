@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from hermes.market.sessions import SessionCalendar, SessionTracker, load_zone, local_to_utc_s
+from hermes.market.sessions import (
+    SessionCalendar,
+    SessionTracker,
+    load_zone,
+    local_to_utc_s,
+)
 
 S = 1_000_000_000
 
 
 def utc(s: str) -> int:
-    return int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp())
+    return int(datetime.fromisoformat(s).replace(tzinfo=UTC).timestamp())
 
 
 # MNQ-like week around the 2026 fall DST transition (US: Sun 2026-11-01 02:00 CDT -> 01:00 CST)

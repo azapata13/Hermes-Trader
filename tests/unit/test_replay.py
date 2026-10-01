@@ -24,7 +24,12 @@ from hermes.market.events import ConnectionState
 from hermes.market.health import ConflictPhase
 from hermes.market.orderbook import BookState
 from hermes.replay import fingerprint as fp
-from hermes.replay.checkpoints import CheckpointPolicy, Checkpointer, compare_checkpoints, load_checkpoints
+from hermes.replay.checkpoints import (
+    Checkpointer,
+    CheckpointPolicy,
+    compare_checkpoints,
+    load_checkpoints,
+)
 from hermes.replay.clock import ReplayClock
 from hermes.replay.runner import ReplayMode, ReplayOptions, replay_session
 from hermes.replay.source import RecordingSource, ReplayIncompatible
@@ -33,8 +38,8 @@ from tests.support import BASE, BBO, DEPTH, TICK, TRADES, Harness, RawScript, wr
 
 S = 1_000_000_000
 T0 = 1790085600                                   # 2026-09-22 14:00 UTC (09:00 CDT, RTH)
-WEEK = dict(trading_hours="20260921:1700-20260922:1600;20260922:1700-20260923:1600",
-            liquid_hours="20260922:0830-20260922:1500", time_zone_id="US/Central")
+WEEK = {"trading_hours": "20260921:1700-20260922:1600;20260922:1700-20260923:1600",
+        "liquid_hours": "20260922:0830-20260922:1500", "time_zone_id": "US/Central"}
 POLICY = CheckpointPolicy(every_n=25)
 
 
@@ -517,7 +522,7 @@ assert not banned, banned
 print("OK", r.final_hash)
 """
     out = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[2],
-                         capture_output=True, text=True, timeout=120)
+                         capture_output=True, text=True, timeout=120, check=False)
     assert out.returncode == 0, out.stderr
     assert out.stdout.startswith("OK")
 

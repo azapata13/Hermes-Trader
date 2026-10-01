@@ -171,7 +171,7 @@ def test_outside_rth_is_none_with_explicit_reason():
 
 
 def test_unknown_calendar_fails_closed():
-    _, _, out = run(trend(+1, contract=dict(trading_hours="", liquid_hours="", time_zone_id="US/Central")))
+    _, _, out = run(trend(+1, contract={"trading_hours": "", "liquid_hours": "", "time_zone_id": "US/Central"}))
     c = out[-1][0]
     assert c.direction is Direction.NONE
     assert any(r.startswith("safety:session_calendar_invalid") for r in c.blocking_reasons)

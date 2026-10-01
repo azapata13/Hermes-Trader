@@ -25,9 +25,10 @@ import os
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO
 
 from hermes.config import RecorderConfig
 from hermes.ibkr.raw_events import RawEvent

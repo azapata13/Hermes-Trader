@@ -10,10 +10,15 @@ from hermes.config import ConfigError, DecisionConfig, config_from_mapping
 from hermes.decision.approval import approval_payload
 from hermes.decision.candidate import CandidateEngine, Direction
 from hermes.decision.driver import CandidateDriver
-from hermes.decision.lifecycle import CandidateStatus, LifecycleTracker, TERMINAL, setup_id
+from hermes.decision.lifecycle import (
+    TERMINAL,
+    CandidateStatus,
+    LifecycleTracker,
+    setup_id,
+)
 from hermes.market.events import BookSide
 from tests.support import DEPTH, TICK, TRADES, Harness, write_hrec
-from tests.unit.test_candidate import PRE_RTH, S, T0, shift_book, trend
+from tests.unit.test_candidate import PRE_RTH, T0, S, shift_book, trend
 
 
 class Live:

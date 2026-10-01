@@ -17,24 +17,34 @@ Single writer: an optional ``owner_guard`` callable (installed by the live pipel
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
-from hermes.config import BarsConfig, BookConfig, SessionConfig, SubscriptionsConfig, TapeConfig
+from hermes.config import (
+    BarsConfig,
+    BookConfig,
+    SessionConfig,
+    SubscriptionsConfig,
+    TapeConfig,
+)
 from hermes.ibkr.errors import SUBSCRIPTION_FATAL
 from hermes.market import events as M
 from hermes.market.absorption import derive_absorption_context
-from hermes.market.events import AnomalyKind, ConnectionState, ErrorClass, Stream, StreamStatus
 from hermes.market.bars import BarEngine, BarFlag, TradeDisposition
 from hermes.market.classify import QuoteState, TradeClassifier
+from hermes.market.events import (
+    AnomalyKind,
+    ConnectionState,
+    ErrorClass,
+    Stream,
+    StreamStatus,
+)
 from hermes.market.health import ConflictPhase, ConflictRecovery, StreamState
 from hermes.market.metrics import MetricsEngine
 from hermes.market.orderbook import BookState, InvalidationReason, OrderBook
 from hermes.market.patterns import PatternEngine
 from hermes.market.pricegrid import PriceGrid
 from hermes.market.sessions import SessionCalendar, SessionTracker
-from hermes.market.structure import StructureEngine
-from hermes.market.tape import ClassifiedTrade, Tape, TapeSnapshot
 from hermes.market.snapshot import (
     BboSnapshot,
     InstrumentSnapshot,
@@ -42,6 +52,8 @@ from hermes.market.snapshot import (
     StreamSnapshot,
     TradeSnapshot,
 )
+from hermes.market.structure import StructureEngine
+from hermes.market.tape import ClassifiedTrade, Tape, TapeSnapshot
 
 _S = 1_000_000_000
 

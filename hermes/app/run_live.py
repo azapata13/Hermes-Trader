@@ -25,15 +25,11 @@ from typing import Any
 import ibapi
 
 import hermes
-from hermes.config import ConfigError, HermesConfig, load_config, DEFAULT_CONFIG_PATH
+from hermes.config import DEFAULT_CONFIG_PATH, ConfigError, HermesConfig, load_config
 from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
 from hermes.decision.approval import current_approval_payload, render_approval_text
 from hermes.decision.runtime import DecisionRuntime, JournalKind, JournalRecord
-from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
-from hermes.slack.bridge import SlackApprovalBridge
-from hermes.slack.journal import ApprovalJournal
-from hermes.slack.socket_mode import SlackConfigError, SlackSettings, SlackSocketModeTransport
 from hermes.ibkr import raw_events as R
 from hermes.ibkr.adapter import RawPipeline
 from hermes.ibkr.gateway import RequestGateway
@@ -43,8 +39,16 @@ from hermes.market.engine import MarketEngine
 from hermes.market.snapshot import MarketSnapshot, SnapshotPublisher
 from hermes.replay import fingerprint as fp
 from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
-from hermes.replay.warm_start import WarmStartResult, warm_start_engine
 from hermes.replay.decisions import DECISIONS_SIDECAR, decision_meta, save_decisions
+from hermes.replay.warm_start import WarmStartResult, warm_start_engine
+from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
+from hermes.slack.bridge import SlackApprovalBridge
+from hermes.slack.journal import ApprovalJournal
+from hermes.slack.socket_mode import (
+    SlackConfigError,
+    SlackSettings,
+    SlackSocketModeTransport,
+)
 from hermes.storage.reader import verify_session
 from hermes.storage.recorder import Recorder
 
@@ -66,9 +70,9 @@ _SLACK_VIEW_KINDS = frozenset({
 def git_commit() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=_REPO, capture_output=True, text=True,
-                             timeout=2, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                             timeout=2, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False)
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=_REPO, capture_output=True, text=True,
-                               timeout=2, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                               timeout=2, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False)
         return out.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "") if out.returncode == 0 else "unknown"
     except Exception:  # noqa: BLE001
         return "unknown"
