@@ -275,7 +275,8 @@ class SlackSocketModeTransport:
                 approval_view_id=approval_view_id,
                 interaction_wall_ns=_wall_ns(action.get("action_ts")),
             )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            # fail closed: never forwarded as an intent, never raised into the Slack SDK thread
             log.warning("ignored invalid Slack interaction: %s", exc)
             return
         self._on_interaction(interaction)
