@@ -204,7 +204,12 @@ On a real candidate whose window closes without ENTER:
 python tools/replay_report.py "$(ls -td ~/hermes-data/recordings/*/* | head -1)" --verify
 python tools/depth_report.py  "$(ls -td ~/hermes-data/recordings/*/* | head -1)"
 python tools/setup_report.py                       # shadow / missed setups (never P&L)
+python tools/gap_report.py "$(ls -td ~/hermes-data/recordings/*/* | head -1)" --min-move 20
 ```
+
+`gap_report` answers "what happened between two real signals?". It lists the decisions and the
+blocking reasons, the stages, the earlier setup's state, the market move and the data quality.
+Moves without a candidate are reported as reconstructed shadow excursions, never as signals.
 
 `replay_report --verify` also prints a SETUPS section. Its setup-tracking comparison must be
 `EQUIVALENT`, or "not applicable" for recordings made before V1 Pro.

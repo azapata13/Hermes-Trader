@@ -18,6 +18,7 @@ proposes setups to a human in Slack and **stops there**. It is not an execution 
 | D5/D7 shadow / missed setups, statistics, similarity (>= 30) | done | `tests/unit/test_analytics.py` |
 | D8 LLM context + output guard (no path LLM -> action) | done | `tests/unit/test_llm_context.py`, `tests/safety/test_llm_isolation.py` |
 | D9 Slack setup messages (no entry), recorded History, re-arm note | done | `tests/unit/test_slack_pro.py` |
+| Gap analysis between real signals (missed moves, reconstructed shadow, data quality) | done | `tests/unit/test_gaps.py` |
 | Live TWS / MNQZ6 / L2 DOM / real candidate / Slack / screenshot | **NOT LIVE-VERIFIED** | `docs/live-validation.md` §9 |
 
 ## Architecture

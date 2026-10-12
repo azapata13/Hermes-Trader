@@ -34,6 +34,7 @@ MarketEngine ──► DecisionRuntime ──► C9 candidate → LifecycleTrack
 | `hermes/analytics/llm_context.py` | Versioned LLM context, validation, prompt, output guard |
 | `hermes/slack/pro.py` | History and re-arm note providers, Sol interpretation worker |
 | `tools/setup_report.py` | Missed-opportunity / shadow-setup report |
+| `hermes/analytics/gaps.py`, `tools/gap_report.py` | What happened between two real signals (replayed recording) |
 
 ## D3 — setup lifecycle (STALE ≠ DEAD)
 
@@ -114,6 +115,44 @@ Every finished setup is written to `<data>/setups/setups.jsonl` (default
 
 The report always prints `REAL TRADES none executed` on its own line.
 
+## Between two real signals — gap analysis
+
+This tool covers moves the live session had no message for, such as ~20 pt SHORT over ~10 min
+between two Slack messages:
+
+```bash
+python tools/gap_report.py <session_dir> [--min-move 20] [--from HH:MM --to HH:MM]
+```
+
+It replays the recording with the live decision runtime. For each window between two **real**
+signals (APPROVAL_VIEW_CREATED, i.e. what Slack showed) it reports:
+
+1. **Decisions.**
+   - The real, blocked and neutral 30 s decisions.
+   - When nothing was sent, the structured blocking reasons ("why no signal").
+   - What 5m / 1m / 30s, VWAP, tape, OFI and sweep said at each decision.
+2. **Setups.**
+   - The opening signal's tracked state (window STALE / EXPIRED, outcome, shadow MFE / MAE).
+   - Setups still followed, and re-arms.
+3. **Market and data quality.**
+   - Open / high / low.
+   - Data quality: market data OK at evaluations, seconds not OK, tape continuity breaks, alerts.
+4. **Classification.**
+   - `MOVE_WITHOUT_CANDIDATE:<dir>`;
+   - `MOVE_WITH_OPENING_SIGNAL:<dir>`;
+   - `CANDIDATE_BLOCKED`;
+   - `EARLIER_SETUP_MONITORING`;
+   - `REARM`;
+   - `DATA_QUALITY_ISSUES`.
+
+A significant move without a real candidate comes with a **reconstructed shadow excursion** (MFE / MAE
+from the first print of the window). It is labelled *hindsight analysis — not a Hermès signal, not
+executed, not P&L*. It is never written to the decision journal, the setup store or Slack, and the
+decision layer never imports analytics (tested).
+
+Answering "what happened" this way relies on facts the system recorded. It never pretends
+Hermès sent that signal.
+
 ## D6 — re-arm / fresh entry
 
 A re-arm is never "the old signal is still valid, enter at the old price". It exists only when the
@@ -154,7 +193,11 @@ engine facts → build_context() (hermes-llm-context/1) → validate_context() �
      → Sol → guard_output() → thread reply "🧭 Sol — interpretation only (no authority, no order)"
 ```
 
-- **Context.** Every number comes from the engine. History is included only when ≥ 30; otherwise
+- **Luna.** Visual observation of the TWS screenshot, at most 2 ALIGNMENT / CONFLICT lines. NONE /
+  UNKNOWN and any instruction-like line (orders, settings, ENTER / approval claims, stop moves) are
+  dropped. The same filter applies to Sol's caption lines.
+- **Context.** Every number comes from the engine; the context also carries published market health
+  (connection, market data OK, not-OK reasons, alerts). History is included only when ≥ 30; otherwise
   `available: false`. Missing, null, contradictory or under-sampled contexts are rejected and Sol
   is not called.
 - **Guard.** At most 4 lines are kept. A line is dropped if it contains a number that is not in the
