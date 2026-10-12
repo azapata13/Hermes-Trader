@@ -37,7 +37,7 @@ from hermes.slack.protocol import (
     SlackTransport,
     SlackWorkflowState,
 )
-from hermes.slack.render import render_slack_message
+from hermes.slack.render import render_setup_message, render_slack_message
 
 log = logging.getLogger("hermes.slack.bridge")
 
@@ -63,6 +63,17 @@ class OutboundView:
     banner: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OutboundSetup:
+    """V1 Pro: update of an existing proposal message with the setup-tracking view (no buttons)."""
+    proposal_id: str
+    view: object                     # hermes.decision.tracking.SetupView (immutable)
+    kind: str                        # WINDOW_CLOSED / REARMED / INVALIDATED / OUTCOME_FINAL
+
+
+SETUP_SLACK_EVENTS = frozenset({"WINDOW_CLOSED", "REARMED", "INVALIDATED", "OUTCOME_FINAL"})
+
+
 @dataclass(slots=True)
 class SlackBridgeStats:
     queued: int = 0
@@ -78,6 +89,7 @@ class SlackBridgeStats:
     accepted_enters: int = 0
     rejects: int = 0
     unauthorized: int = 0
+    setup_updates: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -94,6 +106,7 @@ class SlackBridgeStats:
             "accepted_enters": self.accepted_enters,
             "rejects": self.rejects,
             "unauthorized": self.unauthorized,
+            "setup_updates": self.setup_updates,
         }
 
 
@@ -139,6 +152,8 @@ class SlackApprovalBridge:
         max_outbox: int = 256,
         max_interactions_per_event: int = 16,
         approvers: ApproverPolicy | None = None,
+        history_provider=None,
+        note_provider=None,
     ) -> None:
         self.runtime = runtime
         self.engine = engine
@@ -146,6 +161,10 @@ class SlackApprovalBridge:
         self.transport = transport
         self.journal = journal or ApprovalJournal()
         self.approvers = approvers or ApproverPolicy(None)   # None = allowlist missing (fail closed for execution)
+        # V1 Pro read-only providers (called on the outbox thread at render time; never gate anything):
+        self.history_provider = history_provider             # ApprovalPayload -> history stat | None (>= 30 only)
+        self.note_provider = note_provider                   # ApprovalPayload -> one-line re-arm note | None
+        self._human_actions: dict[str, str] = {}
         self.enrichment = VisualEnrichmentWorker(transport)
 
         if market_context_provider is None:
@@ -232,6 +251,18 @@ class SlackApprovalBridge:
         else:
             state, banner = _state_for_view(view), None
         self._enqueue(OutboundView(view, state, banner))
+
+    def publish_setup(self, event, view) -> None:
+        """V1 Pro: queue a setup-tracking update of the proposal's existing message. Never posts a new
+        message, never carries buttons, never performs network I/O on the caller's thread."""
+        pid = getattr(view, "proposal_id", None)
+        if event.kind not in SETUP_SLACK_EVENTS or not pid:
+            return
+        with self._display_lock:
+            known = pid in self._message_refs or pid in self._displayed
+        if not known and event.kind != "WINDOW_CLOSED":
+            return
+        self._enqueue(OutboundSetup(pid, view, event.kind))
 
     def _receive_interaction(self, interaction: SlackInteraction) -> None:
         self.stats.interactions_received += 1
@@ -333,6 +364,7 @@ class SlackApprovalBridge:
             ):
                 accepted = True
                 self._human_closed.add(i.proposal_id)
+                self._human_actions[i.proposal_id] = "REJECT recorded"
                 self.stats.rejects += 1
                 self._enqueue(
                     OutboundView(
@@ -360,6 +392,7 @@ class SlackApprovalBridge:
                     codes.append("approver_not_authorized_for_execution")
                 accepted = True
                 self._human_closed.add(i.proposal_id)
+                self._human_actions[i.proposal_id] = "ENTER intent recorded (no order sent)"
                 self.stats.accepted_enters += 1
                 self._enqueue(
                     OutboundView(
@@ -421,14 +454,43 @@ class SlackApprovalBridge:
             try:
                 if item is _STOP:
                     return
-                assert isinstance(item, OutboundView)
-                self._deliver(item)
+                if isinstance(item, OutboundSetup):
+                    self._deliver_setup(item)
+                else:
+                    assert isinstance(item, OutboundView)
+                    self._deliver(item)
             finally:
                 self._outbox.task_done()
 
+    def _deliver_setup(self, item: OutboundSetup) -> None:
+        with self._display_lock:
+            ref = self._message_refs.get(item.proposal_id)
+        if ref is None:
+            return                                   # no message of ours to update (never post a stray one)
+        msg = render_setup_message(item.view, item.kind, human=self._human_actions.get(item.proposal_id))
+        try:
+            self.transport.update(ref, msg)
+        except Exception as exc:  # noqa: BLE001
+            self.stats.update_failures += 1
+            log.error("Slack setup update failed for %s: %s", item.proposal_id, exc)
+            return
+        self.stats.setup_updates += 1
+
+    def _provided(self, provider, p):
+        if provider is None:
+            return None
+        try:
+            return provider(p)
+        except Exception:  # never let analytics break the approval message
+            log.exception("Slack provider failed; message rendered without it")
+            return None
+
     def _deliver(self, item: OutboundView) -> None:
         p = item.view
-        msg = render_slack_message(p, workflow_state=item.state, banner=item.banner)
+        fresh = item.state is SlackWorkflowState.ACTIVE
+        msg = render_slack_message(p, workflow_state=item.state, banner=item.banner,
+                                   history=self._provided(self.history_provider, p) if fresh else None,
+                                   note=self._provided(self.note_provider, p) if fresh else None)
         with self._display_lock:
             ref = self._message_refs.get(p.proposal_id)
         if ref is None:

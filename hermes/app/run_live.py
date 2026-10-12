@@ -25,6 +25,7 @@ from typing import Any
 import ibapi
 
 import hermes
+from hermes.analytics.store import SetupStore
 from hermes.config import DEFAULT_CONFIG_PATH, ConfigError, HermesConfig, load_config
 from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
@@ -45,6 +46,7 @@ from hermes.replay.warm_start import WarmStartResult, warm_start_engine
 from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
 from hermes.slack.bridge import SlackApprovalBridge
 from hermes.slack.journal import ApprovalJournal
+from hermes.slack.pro import history_for, rearm_note
 from hermes.slack.socket_mode import (
     SlackConfigError,
     SlackSettings,
@@ -153,8 +155,13 @@ class LiveRuntime:
         # (replay runs it after the checkpointer too). Proposals only: HUMAN_APPROVAL, no order path.
         self.slack_bridge: SlackApprovalBridge | None = None
         self.slack_config_error: str | None = None
+        # V1 Pro: finished setups are recorded (shadow outcomes) next to the recordings, for History.
+        store_path = os.environ.get("HERMES_SETUP_STORE") or str(
+            Path(cfg.recorder.directory).expanduser().parent / "setups" / "setups.jsonl")
+        self.setup_store = SetupStore(store_path if (record and cfg.recorder.enabled) else None)
         self.decisions: DecisionRuntime | None = (
-            DecisionRuntime(self.engine, cfg.decision, on_record=self._on_decision) if cfg.decision.enabled else None)
+            DecisionRuntime(self.engine, cfg.decision, on_record=self._on_decision,
+                            on_setup_event=self._on_setup_event) if cfg.decision.enabled else None)
         if self.decisions is not None:
             self.pipeline.consumers.append(self.decisions)
             try:
@@ -180,6 +187,8 @@ class LiveRuntime:
                         market_context_provider=self._slack_market_context,
                         status_provider=self._slack_status,
                         approvers=approvers,
+                        history_provider=self._slack_history,
+                        note_provider=self._slack_note,
                     )
                     # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
                     # AFTER DecisionRuntime has applied the current market event.
@@ -198,6 +207,7 @@ class LiveRuntime:
     def run(self, duration_s: float | None = None, install_signals: bool = True) -> dict[str, Any]:
         self._warm_start()
         self.start_recording()
+        self.setup_store.start()
         if self.slack_bridge is not None:
             self.slack_bridge.start()
         if install_signals:
@@ -267,6 +277,7 @@ class LiveRuntime:
             self.decisions.finalize()
         if self.slack_bridge is not None:
             self.slack_bridge.close()
+        self.setup_store.close()
         self.reporter.stop()
         if self.recorder is not None:
             self.recorder.stop()
@@ -299,6 +310,22 @@ class LiveRuntime:
                 **decision_meta(self.cfg, fp.code_fingerprint(), fp.config_fingerprint(self.cfg)))
         except OSError as exc:
             log.error("could not write the decision journal: %s", exc)
+
+    def _on_setup_event(self, e, view) -> None:
+        """V1 Pro setup-tracking transition (rare): log, record finished setups, update Slack."""
+        o = view.outcome
+        dlog.info("SETUP %s seq=%d %s %s->%s %s mfe=%s mae=%s", e.kind, e.seq, e.setup_id, e.from_phase or "-",
+                  e.to_phase, e.detail, view.points(o.mfe_units), view.points(o.mae_units))
+        if e.kind == "OUTCOME_FINAL":
+            self.setup_store.add(view.row())
+        if self.slack_bridge is not None:
+            self.slack_bridge.publish_setup(e, view)
+
+    def _slack_history(self, p):
+        return history_for(self.decisions.setups if self.decisions else None, lambda: self.setup_store.rows, p)
+
+    def _slack_note(self, p):
+        return rearm_note(self.decisions.setups if self.decisions else None, p)
 
     def _on_decision(self, r: JournalRecord, view) -> None:
         """Compact decision log line per journal record (decision transitions only, never per tick)."""

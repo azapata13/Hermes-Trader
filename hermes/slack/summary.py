@@ -38,6 +38,8 @@ class HistoryStat:
     outcome_definition: str          # e.g. "target +1R hit before stop, same session"
     selection_definition: str        # e.g. "LONG continuation, RTH, 5m/1m/30s aligned, trade-flow confirmed"
     source: str                      # recorded data set the numbers come from
+    outcome_label: str = "win"       # what the percentage counts (V1 Pro shadow history: "+1R")
+    shadow: bool = False             # True: hypothetical measurements of setups, never executed trades
 
     def displayable(self, min_samples: int = HISTORY_MIN_SAMPLES) -> bool:
         return (self.samples >= min_samples and 0 <= self.wins <= self.samples
@@ -186,7 +188,8 @@ def decisional_warnings(p: ApprovalPayload) -> tuple[str, ...]:
 def history_line(h: HistoryStat | None) -> str | None:
     if h is None or not h.displayable():
         return None
-    return f"History: {round(100 * h.wins / h.samples)}% win · {h.samples} similar setups"
+    line = f"History: {round(100 * h.wins / h.samples)}% {h.outcome_label} · {h.samples} similar setups"
+    return line + " (shadow)" if h.shadow else line
 
 
 def remaining_s(p: ApprovalPayload) -> int | None:

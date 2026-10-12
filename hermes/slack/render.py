@@ -71,6 +71,7 @@ def render_slack_message(
     workflow_state: SlackWorkflowState = SlackWorkflowState.ACTIVE,
     banner: str | None = None,
     history: HistoryStat | None = None,
+    note: str | None = None,
 ) -> SlackMessage:
     """Render the exact approval view the human is shown.
 
@@ -92,6 +93,8 @@ def render_slack_message(
         blocks.append(_section("\n".join(_esc(w) for w in s.warnings)))
     if s.history:
         blocks.append(_section(_esc(s.history)))
+    if note:
+        blocks.append(_section(_esc(note)))
 
     if workflow_state in (SlackWorkflowState.ACTIVE, SlackWorkflowState.HOLD):
         elements = []
@@ -128,3 +131,67 @@ def render_text(message: SlackMessage) -> str:
         elif b["type"] == "actions":
             out.append("  ".join(f"[ {e['text']['text']} ]" for e in b["elements"]))
     return "\n\n".join(out)
+
+
+# ---------------------------------------------------------------------------- V1 Pro setup messages
+# Shown after the ENTRY WINDOW closed. They never carry buttons: an old entry is never available.
+
+_SETUP_TITLE = {
+    "WINDOW_CLOSED": "👁 SETUP MONITORING",
+    "REARMED": "↻ SETUP RE-ARMED",
+    "INVALIDATED": "✖ SETUP INVALIDATED",
+    "OUTCOME_FINAL": "■ SETUP ENDED",
+}
+
+
+def _pts(view, units, signed: bool = False) -> str:
+    v = view.points(units)
+    if v is None:
+        return "-"
+    return f"{v:+.2f}" if signed else f"{v:.2f}"
+
+
+def render_setup_message(view, kind: str, *, human: str | None = None) -> SlackMessage:
+    """Monitoring / re-arm / invalidation / end-of-tracking view of a setup (no ENTER, ever)."""
+    o = view.outcome
+    title = _SETUP_TITLE.get(kind, "SETUP UPDATE")
+    upp = view.units_per_point
+    head = f"*{title} · {view.direction} {view.symbol}*"
+    closed = view.window_close_status or ("INVALIDATED" if view.phase.value == "INVALIDATED" else "open")
+    lines = [
+        head,
+        f"Original entry {_px_units(view.original_entry_units, upp)} · SL {_px_units(view.original_stop_units, upp)}"
+        f" — entry window closed ({closed})",
+        f"Now {_px_units(o.last_price_units, upp)} · MFE {_pts(view, o.mfe_units, True)} pt · "
+        f"MAE {_pts(view, o.mae_units)} pt",
+    ]
+    if kind == "WINDOW_CLOSED":
+        lines.append("Old entry NOT available. A fresh 30 s trigger is required for a new entry window.")
+    elif kind == "REARMED":
+        lines.append(f"New entry window at {_px_units(view.rearm_entry_units, upp)} — posted separately after a fresh "
+                     "validation. This message has no entry.")
+    elif kind == "INVALIDATED":
+        lines.append("Stop / structure touched — setup closed.")
+    elif kind == "OUTCOME_FINAL":
+        r = o.r_wall_ns
+        lines.append(f"{o.status.value.title()} · +1R {_yn(len(r) > 0 and r[0] is not None)} · "
+                     f"+2R {_yn(len(r) > 1 and r[1] is not None)} · stop-first "
+                     f"{_yn(o.stop_touched and not (r and r[0] is not None))}"
+                     + (f" · {o.incomplete_reason}" if o.incomplete_reason else ""))
+    if human:
+        lines.append(f"Human: {human}")
+    blocks = [_section("\n".join(_esc(x) for x in lines)),
+              {"type": "context", "elements": [{"type": "mrkdwn", "text": _esc(
+                  "Shadow tracking — no order sent, no entry available")}]}]
+    fallback = f"{title} · {view.direction} {view.symbol} · no entry available · no order sent"
+    return SlackMessage(fallback, tuple(blocks))
+
+
+def _yn(x) -> str:
+    return "yes" if x else "no"
+
+
+def _px_units(units, upp) -> str:
+    if units is None:
+        return "-"
+    return f"{units / upp:.2f}" if upp else f"{units} units"

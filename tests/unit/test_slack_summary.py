@@ -186,12 +186,15 @@ def test_history_never_displayed_unless_backed(long_view, h):
     assert summarize(long_view, h).history is None
 
 
-def test_bridge_never_passes_a_history_source():
+def test_bridge_never_fabricates_a_history_source():
+    """V1 Pro: the bridge never builds a HistoryStat itself; history only comes from the injected
+    provider (recorded shadow setups, >= 30 comparables), and summarize() still re-checks it."""
     import inspect
 
     from hermes.slack import bridge
     src = inspect.getsource(bridge)
-    assert "history=" not in src and "HistoryStat" not in src
+    assert "HistoryStat" not in src
+    assert src.count("history=") == 1 and "history=self._provided(self.history_provider, p)" in src
 
 
 # ============================================================================ states
