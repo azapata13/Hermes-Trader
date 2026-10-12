@@ -346,6 +346,7 @@ def test_warm_started_session_replays_to_its_live_checkpoints(tws, tmp_path, mon
     assert r.live_compare.compared == len(rt2.checkpointer.checkpoints) > 0
     assert r.decision_compare is not None and r.decision_compare.equivalent, r.decision_compare_status
     assert r.engine.snapshot() == rt2.engine.snapshot()  # the whole final market state, not only hashes
+    assert r.setup_compare is not None and r.setup_compare.equivalent, r.setup_compare_status   # V1 Pro
 
 
 def test_warm_started_session_without_its_source_is_not_called_a_mismatch(tws, tmp_path, monkeypatch):

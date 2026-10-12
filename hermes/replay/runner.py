@@ -58,6 +58,8 @@ from hermes.replay.decisions import (
     decision_meta,
     load_decisions,
 )
+from hermes.replay.setups import SETUPS_SIDECAR, compare_setups, load_setups
+from hermes.replay.setups import to_dict as setups_to_dict
 from hermes.replay.source import Integrity, RecordingInfo, RecordingSource
 from hermes.replay.warm_start import apply_recorded_warm_start
 
@@ -157,6 +159,8 @@ class ReplayResult:
     decision_set: DecisionSet | None = None
     decision_compare: DecisionCompare | None = None
     decision_compare_status: str = ""
+    setup_compare: Any = None
+    setup_compare_status: str = ""
 
     # convenience
     @property
@@ -300,6 +304,7 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
                "comparison not applicable (raw-event reproducibility only)")
         res.live_compare_status = why
         res.decision_compare_status = why
+        res.setup_compare_status = why
         if drt is not None:
             res.decisions = drt
             res.decision_set = DecisionSet.from_runtime(drt, **decision_meta(cfg, res.code_fingerprint,
@@ -311,9 +316,32 @@ def replay_session(path: str | Path, options: ReplayOptions | None = None) -> Re
         res.decision_set = DecisionSet.from_runtime(drt, **decision_meta(cfg, res.code_fingerprint,
                                                                          res.config_fingerprint))
         _compare_live_decisions(res, src.session_dir / DECISIONS_SIDECAR, opt.compare_live)
+        _compare_live_setups(res, drt, src.session_dir / SETUPS_SIDECAR, opt.compare_live)
     else:
         res.decision_compare_status = "decision layer disabled in the replay config"
     return res
+
+
+def _compare_live_setups(res: ReplayResult, drt, sidecar: Path, enabled: bool) -> None:
+    """V1 Pro: compare the setup-tracking journal (lifecycle / outcome / re-arm) with the live run."""
+    import json
+    if not enabled or not sidecar.exists():
+        res.setup_compare_status = ("no live setup-tracking journal (recording predates V1 Pro or the live run did "
+                                    "not shut down cleanly): not applicable")
+        return
+    try:
+        live = load_setups(sidecar)
+    except (ValueError, KeyError, TypeError) as exc:
+        res.setup_compare_status = f"{SETUPS_SIDECAR} unreadable: {exc}"
+        return
+    if live.get("decision_code_fingerprint") != res.decision_set.meta.get("decision_code_fingerprint"):  # type: ignore[union-attr]
+        res.setup_compare_status = "different decision code than the live run — NO setup-tracking equivalence claim"
+        return
+    mine = json.loads(json.dumps(setups_to_dict(drt.setups)))
+    r = compare_setups(live, mine)
+    res.setup_compare = r
+    res.setup_compare_status = (f"same-code live vs replay: {'EQUIVALENT' if r.equivalent else 'MISMATCH'} — "
+                                + r.line() + (f"; first mismatch {r.first_mismatch}" if r.first_mismatch else ""))
 
 
 def _compare_live_decisions(res: ReplayResult, sidecar: Path, enabled: bool) -> None:

@@ -25,7 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.replay.checkpoints import CheckpointPolicy, compare_checkpoints, load_checkpoints  # noqa: E402
+from hermes.replay.checkpoints import (  # noqa: E402
+    CheckpointPolicy,
+    compare_checkpoints,
+    load_checkpoints,
+)
 from hermes.replay.runner import ReplayMode, ReplayOptions, replay_session  # noqa: E402
 from hermes.replay.source import ReplayIncompatible  # noqa: E402
 
@@ -107,6 +111,11 @@ def render(r) -> list[str]:
         lines.append(f"live        {r.decision_compare_status}")
         if r.decision_compare is not None:
             lines += ["            " + x for x in r.decision_compare.lines()]
+        t = d.setups.counts()
+        lines.append("SETUPS (V1 Pro tracking — shadow measurements, never P&L)")
+        lines.append(f"setups      tracked {t['tracked']}  by phase {t['by_phase']}  by outcome {t['by_outcome']}  "
+                     f"events {t['events']}")
+        lines.append(f"live        {r.setup_compare_status}")
     for n in r.notes:
         lines.append(f"note        {n}")
     return lines

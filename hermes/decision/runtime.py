@@ -23,8 +23,10 @@ from hermes.config import DecisionConfig
 from hermes.decision.approval import ApprovalPayload, current_approval_payload
 from hermes.decision.candidate import CandidateEngine, SetupCandidate
 from hermes.decision.driver import CandidateDriver
+from hermes.decision.features import record_features
 from hermes.decision.lifecycle import CandidateRecord, CandidateStatus, StatusReason
 from hermes.decision.reasons import SRC_LIFECYCLE, Reason, Severity
+from hermes.decision.tracking import SetupTracker, TrackingConfig
 from hermes.replay.fingerprint import digest
 
 JOURNAL_SCHEMA_VERSION = 1
@@ -101,7 +103,8 @@ class DecisionRuntime:
     """Live pipeline consumer AND replay observer (identical code path)."""
 
     def __init__(self, engine, cfg: DecisionConfig | None = None, instrument_id: int | None = None,
-                 on_record=None, max_records: int = 500_000) -> None:
+                 on_record=None, max_records: int = 500_000, on_setup_event=None,
+                 tracking: TrackingConfig | None = None) -> None:
         self.engine = engine
         self.cfg = cfg or DecisionConfig()
         self.driver = CandidateDriver(engine, CandidateEngine(self.cfg, instrument_id))
@@ -116,23 +119,32 @@ class DecisionRuntime:
         self.last_seq = 0
         self.raw_count = 0
         self._chain = "0" * 64                # rolling digest over every journal row ever produced
+        self.last_wall_ns = 0
+        # V1 Pro: setup tracking / outcome / re-arm. Analytics only: it reads the lifecycle and the
+        # engine, never feeds back into candidates, statuses, approval or this journal/fingerprint.
+        self.setups = SetupTracker(self.cfg.point_value_usd, tracking, on_event=on_setup_event,
+                                   feature_fn=record_features)
 
     # ------------------------------------------------------------------ consumer interface
     def after_event(self, raw, events, now_mono_ns: int) -> None:
         self.raw_count += 1
         self.last_seq = raw.seq
+        self.last_wall_ns = raw.recv_wall_ns
         lc = self.driver.lifecycle
         before = ({sid: rec.temporary_hold_reasons for sid, rec in lc.active.items()} if lc.active else None)
         cand = self.driver.after_event(raw, events, now_mono_ns)
         if before is None and cand is None:
+            self.setups.after_event(self.engine, raw)   # O(1) when no setup is followed
             return                            # the common case: nothing active, no bar completed
         out: list[tuple] = []
         if before is not None:
+            self.setups.on_transitions(self.driver.last_transitions, raw)
             self._lifecycle_records(before, raw, out)
         if cand is not None:
             self._evaluation_records(cand, raw, out)
         if out:
             self._emit(out, raw)
+        self.setups.after_event(self.engine, raw)
 
     def _lifecycle_records(self, before: dict, raw, out: list) -> None:
         lc = self.driver.lifecycle
@@ -164,6 +176,7 @@ class DecisionRuntime:
                                             instrument_id=cand.instrument_id)
             self.proposals[rec.setup_id] = view.proposal_id
             self.last_view = view
+            self.setups.on_actionable(rec, view.proposal_id, raw)
             out.append((JournalKind.CANDIDATE_ACTIONABLE, rec.setup_id, view.proposal_id, None, rec.status.value,
                         cand.direction.value, rec.approval_allowed_now, ()))
             out.append((JournalKind.APPROVAL_VIEW_CREATED, rec.setup_id, view.proposal_id, view.approval_view_id,
@@ -208,6 +221,7 @@ class DecisionRuntime:
 
     def finalize(self) -> DecisionCheckpoint:
         self.final = DecisionCheckpoint(self.last_seq, "final", self.fingerprint())
+        self.setups.finalize(self.last_seq, self.last_wall_ns)
         return self.final
 
     def counts(self) -> dict:

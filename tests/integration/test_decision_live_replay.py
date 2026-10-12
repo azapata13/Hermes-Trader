@@ -14,7 +14,11 @@ import pytest
 
 from hermes.app.run_live import LiveRuntime
 from hermes.config import load_config
-from hermes.decision.response import HumanAction, HumanApprovalResponse, execution_prerequisites
+from hermes.decision.response import (
+    HumanAction,
+    HumanApprovalResponse,
+    execution_prerequisites,
+)
 from hermes.decision.runtime import DecisionRuntime, JournalKind
 from hermes.decision.safety import approval_check
 from hermes.replay.decisions import DECISIONS_SIDECAR, compare_decisions, load_decisions
@@ -200,3 +204,50 @@ def test_approval_view_id_stable_for_same_event_state(expiry_run):
     a = current_approval_payload(rt.engine, rec, now_wall_ns=view.safety_evaluated_wall_ns)
     b = current_approval_payload(rt.engine, rec, now_wall_ns=view.safety_evaluated_wall_ns)
     assert a.approval_view_id == b.approval_view_id and a.proposal_id == view.proposal_id
+
+
+# ============================================================================ V1 Pro setup tracking
+
+def test_live_setup_tracking_is_saved_and_replays_equivalent(expiry_run):
+    """D3/D4/D6 through the REAL live runtime: setups.json is written at shutdown and replay rebuilds
+    exactly the same setup lifecycle, outcomes and re-arm links (tracking fingerprint included)."""
+    from hermes.replay.setups import SETUPS_SIDECAR, load_setups
+    rt = expiry_run
+    d = rt.recorder.session_dir
+    assert rt.setups_file is not None and (d / SETUPS_SIDECAR).exists()
+    live = load_setups(d / SETUPS_SIDECAR)
+    assert live["setups"] and all(s["execution"] == "SHADOW" for s in live["setups"])
+    kinds_ = {e[3] for e in live["events"]}
+    assert {"TRACKED", "WINDOW_CLOSED", "REARMED", "OUTCOME_FINAL"} <= kinds_
+    a = replay_session(d)
+    assert a.setup_compare is not None and a.setup_compare.equivalent, a.setup_compare_status
+    assert a.setup_compare.events[0] == len(live["events"]) > 0
+
+
+def test_replay_of_a_recording_without_setups_json_says_not_applicable(expiry_run, tmp_path):
+    import shutil
+
+    from hermes.replay.setups import SETUPS_SIDECAR
+    src = expiry_run.recorder.session_dir
+    dst = tmp_path / "copy"
+    shutil.copytree(src, dst)
+    (dst / SETUPS_SIDECAR).unlink()                    # e.g. a recording made before V1 Pro
+    a = replay_session(dst)
+    assert a.setup_compare is None and "not applicable" in a.setup_compare_status
+    assert a.decision_compare is not None and a.decision_compare.equivalent   # older contracts unaffected
+
+
+def test_tampered_setups_json_is_reported_as_mismatch(expiry_run, tmp_path):
+    import json
+    import shutil
+
+    from hermes.replay.setups import SETUPS_SIDECAR
+    dst = tmp_path / "copy"
+    shutil.copytree(expiry_run.recorder.session_dir, dst)
+    p = dst / SETUPS_SIDECAR
+    d = json.loads(p.read_text())
+    d["setups"][0]["outcome"]["mfe_units"] += 4         # a forged excursion
+    p.write_text(json.dumps(d))
+    a = replay_session(dst)
+    assert a.setup_compare is not None and not a.setup_compare.equivalent
+    assert "MISMATCH" in a.setup_compare_status

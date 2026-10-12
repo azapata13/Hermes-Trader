@@ -40,6 +40,7 @@ from hermes.market.snapshot import MarketSnapshot, SnapshotPublisher
 from hermes.replay import fingerprint as fp
 from hermes.replay.checkpoints import SIDECAR_NAME, Checkpointer
 from hermes.replay.decisions import DECISIONS_SIDECAR, decision_meta, save_decisions
+from hermes.replay.setups import SETUPS_SIDECAR, save_setups
 from hermes.replay.warm_start import WarmStartResult, warm_start_engine
 from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
 from hermes.slack.bridge import SlackApprovalBridge
@@ -184,6 +185,7 @@ class LiveRuntime:
                     # AFTER DecisionRuntime has applied the current market event.
                     self.pipeline.consumers.append(self.slack_bridge)
         self.decision_file: Path | None = None
+        self.setups_file: Path | None = None
         self.supervisor = Supervisor(cfg, self.pipeline, self.gateway, self.session)
         self.max_msg_queue = 0
         self._violations_reported = 0
@@ -271,6 +273,19 @@ class LiveRuntime:
             self.verification = verify_session(self.recorder.session_dir)
             self._save_checkpoints()
             self._save_decisions()
+            self._save_setups()
+
+    def _save_setups(self) -> None:
+        """V1 Pro: persist the setup-tracking journal + final setup views (analytics, shadow only)."""
+        if self.decisions is None:
+            return
+        try:
+            self.setups_file = save_setups(
+                self.decisions.setups, Path(self.recorder.session_dir) / SETUPS_SIDECAR,  # type: ignore[union-attr]
+                source="live", session_id=self.recorder.session_id,  # type: ignore[union-attr]
+                **decision_meta(self.cfg, fp.code_fingerprint(), fp.config_fingerprint(self.cfg)))
+        except OSError as exc:
+            log.error("could not write the setup-tracking journal: %s", exc)
 
     def _save_decisions(self) -> None:
         """Persist the decision journal + decision checkpoints (separate from market checkpoints)."""
