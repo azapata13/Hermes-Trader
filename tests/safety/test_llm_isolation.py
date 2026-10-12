@@ -12,7 +12,8 @@ from hermes.slack.pro import InterpretationWorker
 
 ROOT = Path(__file__).resolve().parents[2]
 LLM_MODULES = [ROOT / "hermes" / "analytics" / "llm_context.py", ROOT / "hermes" / "slack" / "pro.py",
-               ROOT / "hermes" / "analytics" / "stats.py", ROOT / "hermes" / "analytics" / "store.py"]
+               ROOT / "hermes" / "analytics" / "stats.py", ROOT / "hermes" / "analytics" / "store.py",
+               ROOT / "hermes" / "analytics" / "gaps.py"]
 FORBIDDEN = ("ibapi", "hermes.ibkr", "hermes.app", "hermes.storage", "hermes.decision.runtime",
              "hermes.decision.lifecycle", "hermes.decision.safety", "hermes.decision.response", "hermes.config",
              "socket", "subprocess")
@@ -88,3 +89,13 @@ def test_malicious_interpreter_output_changes_no_approval_state_or_decision(tmp_
     cfg = load_config()
     assert cfg.safety.orders_enabled is False and cfg.ibkr.read_only is True and cfg.decision.mode == "HUMAN_APPROVAL"
     assert json.dumps(attack) not in json.dumps([m.blocks for _, m in fake.updates])
+
+
+def test_decision_layer_never_imports_analytics_or_slack():
+    """Shadow / reconstructed / historical analytics can never feed back into candidate creation."""
+    problems = []
+    for p in (ROOT / "hermes" / "decision").glob("*.py"):
+        for m in _imports(p):
+            if m.startswith(("hermes.analytics", "hermes.slack")):
+                problems.append(f"{p.name} imports {m}")
+    assert not problems, problems
