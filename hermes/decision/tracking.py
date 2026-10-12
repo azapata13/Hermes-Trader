@@ -123,6 +123,7 @@ class SetupView:
     ended_wall_ns: int | None = None
     outcome: Outcome = field(default_factory=Outcome)
     features: tuple[tuple[str, str], ...] = ()   # D7 comparable characteristics (strings only)
+    horizons_s: tuple[int, ...] = ()             # horizons of outcome.horizon_units, in seconds
 
     # ---- presentation helpers (pure)
     def points(self, units: int | None) -> float | None:
@@ -169,7 +170,7 @@ class SetupView:
                 "mfe_after_close_units": o.mfe_after_close_units, "last_price_units": o.last_price_units,
                 "prints": o.prints, "incomplete_reason": o.incomplete_reason,
             },
-            "features": dict(self.features),
+            "features": dict(self.features), "horizons_s": list(self.horizons_s),
             "execution": "SHADOW",            # V1: no execution layer -> every setup is a shadow measurement
         }
 
@@ -228,6 +229,7 @@ class SetupTracker:
             rearm_of=prior.setup_id if prior is not None else None,
             outcome=Outcome(r_wall_ns=(None,) * self.cfg.max_r, horizon_units=(None,) * n),
             features=self.feature_fn(rec) if self.feature_fn is not None else (),
+            horizons_s=self.cfg.horizons_s,
         )
         if len(self.open) >= self.cfg.max_tracked:
             oldest = min(self.open.values(), key=lambda v: (v.created_seq, v.setup_id))
