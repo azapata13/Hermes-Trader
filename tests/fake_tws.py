@@ -26,7 +26,8 @@ from ibapi.message import IN, OUT
 from ibapi.protobuf import (
     ContractData_pb2, ContractDataEnd_pb2, ContractDataRequest_pb2, CurrentTime_pb2, ErrorMessage_pb2,
     MarketDataRequest_pb2, MarketDataType_pb2, MarketDepth_pb2, MarketDepthRequest_pb2, MarketRule_pb2,
-    MarketRuleRequest_pb2, NextValidId_pb2, TickByTickData_pb2, TickByTickRequest_pb2, TickPrice_pb2,
+    MarketRuleRequest_pb2, NextValidId_pb2, StartApiRequest_pb2, TickByTickData_pb2, TickByTickRequest_pb2,
+    TickPrice_pb2,
 )
 
 PB = 200
@@ -38,6 +39,10 @@ class FakeTws:
         self.base = base_price
         self.auto = auto
         self.conflict_mode = False        # answer every reqMktData with error 10197 instead of data
+        self.send_next_valid_id = True    # False: accept the API session but never send nextValidId
+        self.rejected_client_ids: list[int] = []   # like TWS: a clientId already in use gets 326 + close
+        self.start_api_client_ids: list[int] = []
+        self._client_ids: set[int] = set()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
@@ -56,23 +61,58 @@ class FakeTws:
 
     # ------------------------------------------------------------------ server loop
     def _serve(self) -> None:
+        # one thread per socket, like TWS: a second API client can connect while the first is up
         self.sock.settimeout(0.2)
         while not self._stop:
             try:
                 conn, _ = self.sock.accept()
             except (socket.timeout, OSError):
                 continue
+            threading.Thread(target=self._handle, args=(conn,), name="fake-tws-conn", daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        client_id: int | None = None
+        try:
+            conn.settimeout(None)
+            assert self._recv_exact(conn, 4) == b"API\0"
+            (n,) = struct.unpack("!I", self._recv_exact(conn, 4))
+            self._recv_exact(conn, n)                                    # "v100..223"
+            hello = f"{SERVER_VERSION}\0" + "20260924 12:00:00 US/Eastern\0"
+            conn.sendall(struct.pack("!I", len(hello)) + hello.encode())
+            (n,) = struct.unpack("!I", self._recv_exact(conn, 4))       # first message: startApi
+            first = self._recv_exact(conn, n)
+            msg_id = int.from_bytes(first[:4], "big")
+            if (msg_id - PB if msg_id > PB else msg_id) == OUT.START_API:
+                req = StartApiRequest_pb2.StartApiRequest()
+                req.ParseFromString(first[4:])
+                client_id = req.clientId
+                with self._lock:
+                    self.start_api_client_ids.append(client_id)
+                    in_use = client_id in self._client_ids
+                    if not in_use:
+                        self._client_ids.add(client_id)
+                if in_use:
+                    self.rejected_client_ids.append(client_id)
+                    client_id = None
+                    self._send_on(conn, IN.ERR_MSG, ErrorMessage_pb2.ErrorMessage(
+                        id=-1, errorTime=int(time.time() * 1000), errorCode=326,
+                        errorMsg="Unable to connect as the client id is already in use. Retry with a unique client id."))
+                    time.sleep(0.05)
+                    return                                               # TWS then closes the socket
             self.connections += 1
             self.conn = conn
+            self._session(conn, first)
+        except (OSError, ConnectionError, AssertionError):
+            pass
+        finally:
+            if client_id is not None:
+                with self._lock:
+                    self._client_ids.discard(client_id)
             try:
-                self._session(conn)
-            except (OSError, ConnectionError):
+                conn.close()
+            except OSError:
                 pass
-            finally:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
+            if self.conn is conn:
                 self.conn = None
 
     def _recv_exact(self, conn: socket.socket, n: int) -> bytes:
@@ -84,21 +124,16 @@ class FakeTws:
             buf += chunk
         return buf
 
-    def _session(self, conn: socket.socket) -> None:
-        conn.settimeout(None)
-        assert self._recv_exact(conn, 4) == b"API\0"
-        (n,) = struct.unpack("!I", self._recv_exact(conn, 4))
-        self._recv_exact(conn, n)                                    # "v100..223"
-        hello = f"{SERVER_VERSION}\0" + "20260924 12:00:00 US/Eastern\0"
-        conn.sendall(struct.pack("!I", len(hello)) + hello.encode())
+    def _session(self, conn: socket.socket, first: bytes) -> None:
+        payload = first
         while not self._stop:
-            (n,) = struct.unpack("!I", self._recv_exact(conn, 4))
-            payload = self._recv_exact(conn, n)
             msg_id = int.from_bytes(payload[:4], "big")
             with self._lock:
                 self.received.append((msg_id, payload[4:]))
             if self.auto:
                 self._respond(msg_id, payload[4:])
+            (n,) = struct.unpack("!I", self._recv_exact(conn, 4))
+            payload = self._recv_exact(conn, n)
 
     # ------------------------------------------------------------------ auto-responses
     def _note(self, method: str, req_id: int) -> None:
@@ -108,7 +143,8 @@ class FakeTws:
     def _respond(self, msg_id: int, body: bytes) -> None:
         base = msg_id - PB if msg_id > PB else msg_id
         if base == OUT.START_API:
-            self.next_valid_id(1)
+            if self.send_next_valid_id:
+                self.next_valid_id(1)
         elif base == OUT.REQ_CURRENT_TIME:
             self.current_time(int(time.time()))
         elif base == OUT.REQ_CONTRACT_DATA:
@@ -157,6 +193,11 @@ class FakeTws:
         if conn is not None:
             with self._send_lock:
                 conn.sendall(struct.pack("!I", len(body)) + body)
+
+    def _send_on(self, conn: socket.socket, in_msg_id: int, proto) -> None:
+        body = (in_msg_id + PB).to_bytes(4, "big") + proto.SerializeToString()
+        with self._send_lock:
+            conn.sendall(struct.pack("!I", len(body)) + body)
 
     def next_valid_id(self, oid: int) -> None:
         self.send(IN.NEXT_VALID_ID, NextValidId_pb2.NextValidId(orderId=oid))

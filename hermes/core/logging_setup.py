@@ -5,6 +5,9 @@ Files (under ``log_directory``, default ``~/hermes-data/logs``):
     hermes-telemetry.jsonl  one JSON object per telemetry report (rotating)
 Console: concise lines (stderr) when enabled.
 
+Every line carries the process id (``p<pid>``): two processes writing to one terminal or file
+must be distinguishable at a glance.
+
 ibapi's own loggers are raised to WARNING: they log every message at INFO/DEBUG.
 """
 
@@ -42,7 +45,7 @@ def setup_logging(log_directory: str, console: bool = True, level: int = logging
 
     app = logging.handlers.RotatingFileHandler(log_dir / "hermes.log", maxBytes=50 * 2**20, backupCount=10,
                                                encoding="utf-8")
-    app.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-8s %(threadName)s %(name)s: %(message)s",
+    app.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-8s p%(process)d %(threadName)s %(name)s: %(message)s",
                                        "%Y-%m-%d %H:%M:%S"))
     app.addFilter(_NotTelemetry())
 
@@ -54,7 +57,7 @@ def setup_logging(log_directory: str, console: bool = True, level: int = logging
     handlers: list[logging.Handler] = [app, tele]
     if console:
         con = logging.StreamHandler()
-        con.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s %(message)s", "%H:%M:%S"))
+        con.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s p%(process)d %(message)s", "%H:%M:%S"))
         con.addFilter(_NotTelemetry())
         handlers.append(con)
 

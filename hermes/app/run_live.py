@@ -29,6 +29,7 @@ from hermes.analytics.llm_context import build_context, interpret
 from hermes.analytics.stats import comparable
 from hermes.analytics.store import SetupStore
 from hermes.config import DEFAULT_CONFIG_PATH, ConfigError, HermesConfig, load_config
+from hermes.core.instance_lock import InstanceLock, InstanceLockError
 from hermes.core.logging_setup import setup_logging
 from hermes.core.telemetry import Reporter, Telemetry
 from hermes.decision.approval import current_approval_payload, render_approval_text
@@ -205,6 +206,8 @@ class LiveRuntime:
         self.decision_file: Path | None = None
         self.setups_file: Path | None = None
         self.supervisor = Supervisor(cfg, self.pipeline, self.gateway, self.session)
+        lock_dir = os.getenv("HERMES_LOCK_DIR") or str(Path(os.path.expanduser(cfg.recorder.directory)).parent / "run")
+        self.instance_lock = InstanceLock(lock_dir, cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id)
         self.max_msg_queue = 0
         self._violations_reported = 0
         self.heartbeat = Heartbeat(self.gateway, cfg.ibkr.heartbeat_interval_ms, on_beat=self._on_beat)
@@ -214,6 +217,21 @@ class LiveRuntime:
 
     # ------------------------------------------------------------------ lifecycle
     def run(self, duration_s: float | None = None, install_signals: bool = True) -> dict[str, Any]:
+        # One live process per TWS API identity: a second one would loop on TWS error 326 for ever and
+        # share the console, logs, recordings and the Slack app with the healthy one (see instance_lock).
+        try:
+            self.instance_lock.acquire()
+        except InstanceLockError as exc:
+            log.critical("refusing to start: %s. TWS allows one API session per clientId (%s:%d clientId=%d); "
+                         "stop the other instance first (ps -axo pid,lstart,command | grep -i hermes).",
+                         exc, self.cfg.ibkr.host, self.cfg.ibkr.port, self.cfg.ibkr.client_id)
+            raise
+        try:
+            return self._run_locked(duration_s, install_signals)
+        finally:
+            self.instance_lock.release()
+
+    def _run_locked(self, duration_s: float | None, install_signals: bool) -> dict[str, Any]:
         self._warm_start()
         self.start_recording()
         self.setup_store.start()
@@ -1022,6 +1040,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rt = LiveRuntime(cfg, record=not args.no_record)
         summary = rt.run(args.duration)
+    except InstanceLockError as exc:
+        print(f"\nHERMÈS NOT STARTED: {exc}\nTWS allows one API session per clientId; stop the running instance "
+              "first (ps -axo pid,lstart,command | grep -i hermes).", file=sys.stderr)
+        return 3
     finally:
         handle.stop()
     print(f"\n=========== HERMÈS {HERMES_VERSION} RUN SUMMARY (READ-ONLY, no orders) ===========")

@@ -9,6 +9,7 @@ Then verifies the recording and live/replay equivalence.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 
@@ -16,6 +17,7 @@ import pytest
 
 from hermes.app.run_live import LiveRuntime
 from hermes.config import load_config
+from hermes.core.instance_lock import InstanceLockError
 from hermes.ibkr import codes
 from hermes.market.health import ConflictPhase
 from hermes.market.orderbook import BookState
@@ -404,3 +406,43 @@ def test_depth_resync_log_names_the_invalidation_reason(tws, tmp_path, caplog):
     run.join(stop=True)
     lines = [r.getMessage() for r in caplog.records if "depth resync" in r.getMessage()]
     assert lines and "reason=structural_violation" in lines[0], lines
+
+
+# ---------------------------------------------------------------------------- live investigation: two instances
+
+def test_two_instances_with_one_client_id_reproduce_the_live_log(tws, tmp_path, monkeypatch, caplog):
+    """The observed live log, reproduced: a healthy Hermès holds clientId 110 while a second process
+    (here with a separate lock directory, i.e. no instance guard) loops on 'connecting to TWS ...
+    (attempt N)' -> TWS 326 -> retry. The healthy session is untouched; the second never gets data."""
+    monkeypatch.setenv("HERMES_LOCK_DIR", str(tmp_path / "lock-a"))
+    rt1 = LiveRuntime(fast_cfg(tws.port, tmp_path / "a"))
+    monkeypatch.setenv("HERMES_LOCK_DIR", str(tmp_path / "lock-b"))
+    rt2 = LiveRuntime(fast_cfg(tws.port, tmp_path / "b"))
+    run1 = Run(rt1, 8.0)
+    wait_for(lambda: md_ok(rt1), what="market data ok (instance 1)")
+    caplog.set_level(logging.WARNING, logger="hermes.session")
+    run2 = Run(rt2, 2.5)
+    s2 = run2.join()
+    assert rt2.supervisor.connect_attempts >= 3 and rt2.supervisor.client_id_rejections >= 3
+    assert rt2.supervisor.last_handshake == "rejected"
+    assert not s2["healthy"] and rt2.decisions.driver.candidates.stats.evaluations == 0
+    assert len(tws.rejected_client_ids) >= 3 and set(tws.rejected_client_ids) == {110}
+    assert any("error 326" in r.getMessage() and r.levelno == logging.CRITICAL for r in caplog.records)
+    assert md_ok(rt1) and rt1.supervisor.connect_attempts == 1     # the healthy one never reconnected
+    run1.join(stop=True)
+
+
+def test_second_instance_on_the_same_tws_identity_refuses_to_start(tws, tmp_path, caplog):
+    cfg = fast_cfg(tws.port, tmp_path)
+    rt1 = LiveRuntime(cfg)
+    run1 = Run(rt1, 8.0)
+    wait_for(lambda: md_ok(rt1), what="market data ok (instance 1)")
+    rt2 = LiveRuntime(cfg)
+    with pytest.raises(InstanceLockError):
+        rt2.run(2.0, install_signals=False)
+    assert rt2.supervisor.connect_attempts == 0                     # never touched TWS or Slack
+    assert tws.start_api_client_ids == [110] and tws.rejected_client_ids == []
+    assert any("refusing to start" in r.getMessage() for r in caplog.records)
+    assert md_ok(rt1) and rt1.supervisor.connect_attempts == 1
+    run1.join(stop=True)
+    LiveRuntime(cfg).instance_lock.acquire().release()                # released once instance 1 ended

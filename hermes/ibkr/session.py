@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import socket
 import threading
 import time
 from collections import deque
@@ -40,6 +41,7 @@ from hermes.market.events import ConnectionState, Stream
 
 log = logging.getLogger("hermes.session")
 _S = 1_000_000_000
+CLIENT_ID_IN_USE = 326          # TWS: "Unable to connect as the client id is already in use"
 
 
 class Phase(Enum):
@@ -84,6 +86,8 @@ class IbkrSession:
         self.spec = spec_from_config(cfg)
         self.phase = Phase.WAIT_CONNECT
         self.connected = threading.Event()
+        # TWS error 326 ("client id is already in use"): this attempt can never get nextValidId.
+        self.client_id_rejected = threading.Event()
         self._phase_started = 0
         self._resolved_once = False
         self._subs: dict[Stream, int | None] = {s: None for s in Stream}
@@ -113,6 +117,8 @@ class IbkrSession:
             elif isinstance(ev, M.ErrorEvent) and ev.error_class is M.ErrorClass.SESSION_CONFLICT:
                 if self._conflict_seen_mono is None:
                     self._conflict_seen_mono = now
+            elif isinstance(ev, M.ErrorEvent) and ev.code == CLIENT_ID_IN_USE:
+                self.client_id_rejected.set()
         if self._shutting_down or self.engine.connection is not ConnectionState.CONNECTED:
             return
         try:
@@ -343,7 +349,10 @@ class Supervisor:
         self.client: ReadOnlyClient | None = None
         self.dispatch: threading.Thread | None = None
         self.connect_attempts = 0
+        self.client_id_rejections = 0         # consecutive TWS 326 answers (reset by a successful handshake)
+        self.last_handshake: str | None = None
         self.final_snapshot = None
+        self._run_lock = threading.Lock()
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGINT, lambda *_: self.request_stop("SIGINT"))
@@ -360,6 +369,17 @@ class Supervisor:
         self.p.post_local(R.RawControl, kind="operator_retry", detail="SIGUSR1")
 
     def run(self, duration_s: float | None = None) -> None:
+        """Single connection owner. Not re-entrant: a second concurrent ``run`` is refused, so at most
+        one TWS socket (and one ``connect``) exists per Supervisor at any time. There is no timer: the
+        reconnect delay is a plain wait on this thread, so nothing can fire while a connection is up."""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Supervisor.run is already active: refusing a second concurrent connection loop")
+        try:
+            self._run(duration_s)
+        finally:
+            self._run_lock.release()
+
+    def _run(self, duration_s: float | None) -> None:
         s = self.cfg.session
         ib = self.cfg.ibkr
         deadline = time.monotonic() + duration_s if duration_s else None
@@ -368,6 +388,7 @@ class Supervisor:
             self.connect_attempts += 1
             self.p.post_local(R.RawControl, kind="connect_attempt", detail=f"{ib.host}:{ib.port} id={ib.client_id}")
             self.session.connected.clear()
+            self.session.client_id_rejected.clear()
             client = ReadOnlyClient(self.adapter)
             self.client = client
             self.gw.bind(client)
@@ -377,16 +398,31 @@ class Supervisor:
             if client.isConnected():
                 self.dispatch = threading.Thread(target=client.run, name="ibkr-dispatch", daemon=True)
                 self.dispatch.start()
-                if self.session.connected.wait(ib.connect_timeout_s):
+                outcome = self._await_handshake(ib.connect_timeout_s)
+                self.last_handshake = outcome
+                if outcome == "ready":
                     backoff = s.reconnect_initial_backoff_s
+                    self.client_id_rejections = 0
                     while (self.dispatch.is_alive() and not self.stop_event.is_set()
                            and not self._expired(deadline)):
                         self.stop_event.wait(0.2)
-                else:
+                elif outcome == "rejected":
+                    # Normal exponential backoff (2 s .. 60 s): a single 326 right after a restart can be
+                    # TWS still holding our own previous socket; repeated ones mean another client owns it.
+                    self.client_id_rejections += 1
+                    log.log(logging.CRITICAL if self.client_id_rejections > 1 else logging.WARNING,
+                            "TWS rejected clientId %d (error 326: already in use by another API session; "
+                            "rejection %d in a row). If this repeats, another Hermès or another application is "
+                            "connected to %s:%d with this clientId and this process gets no market data until it "
+                            "is gone. Find it with: ps -axo pid,lstart,command | grep -i hermes",
+                            ib.client_id, self.client_id_rejections, ib.host, ib.port)
+                elif outcome == "closed":
+                    log.error("TWS closed the connection before nextValidId (attempt %d)", self.connect_attempts)
+                elif outcome == "timeout":
                     log.error("no nextValidId within %.1fs", ib.connect_timeout_s)
                 if self.dispatch.is_alive():
                     self._graceful_disconnect(client)
-                else:
+                elif outcome == "ready":
                     log.error("TWS connection lost")
             else:
                 self.p.post_local(R.RawControl, kind="connect_failed", detail="socket connect failed")
@@ -399,6 +435,26 @@ class Supervisor:
             backoff = min(backoff * 2, s.reconnect_max_backoff_s)
         self.p.pump()
 
+    def _await_handshake(self, timeout_s: float) -> str:
+        """'ready' (nextValidId), 'rejected' (error 326), 'closed' (socket gone first), 'stopped' or
+        'timeout'. Returns as soon as the outcome is known instead of always waiting the full timeout."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self.session.connected.is_set():
+                return "ready"
+            if self.session.client_id_rejected.is_set():
+                return "rejected"
+            if self.dispatch is None or not self.dispatch.is_alive():
+                # the reader may have queued nextValidId / 326 just before the socket closed
+                return ("ready" if self.session.connected.is_set()
+                        else "rejected" if self.session.client_id_rejected.is_set() else "closed")
+            if self.stop_event.is_set():
+                return "stopped"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout"
+            self.session.connected.wait(min(0.05, remaining))
+
     def _graceful_disconnect(self, client: ReadOnlyClient) -> None:
         self.final_snapshot = self.p.publisher.latest()     # state before we cancel anything
         try:
@@ -406,6 +462,16 @@ class Supervisor:
         except Exception:
             log.exception("shutdown requests failed")
         time.sleep(self.cfg.session.shutdown_grace_s)
+        # Close the TCP session NOW. ibapi's disconnect() only close()s the fd while its reader thread
+        # is blocked in recv() (1 s socket timeout), so the FIN could leave up to a second later and
+        # TWS would still see our clientId in use (error 326) on an immediate reconnect / restart.
+        # shutdown() is socket-level only: no API message is sent.
+        sock = getattr(getattr(client, "conn", None), "socket", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         client.disconnect()
         if self.dispatch is not None:
             self.dispatch.join(5)
