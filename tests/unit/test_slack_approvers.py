@@ -234,3 +234,10 @@ def test_malformed_allowlist_disables_slack_in_the_live_runtime(monkeypatch, tmp
     rt = LiveRuntime(cfg, record=False)
     assert rt.slack_bridge is None and APPROVER_ENV in (rt.slack_config_error or "")
     assert "felipe" not in (rt.slack_config_error or "")         # the offending value is not echoed
+
+
+def test_the_configured_operator_id_format_is_accepted():
+    """The operator's real Slack member ID (configured locally in .env.local, never in code) is valid."""
+    p = ApproverPolicy.from_env({APPROVER_ENV: "U0BLVK3L0AG"})
+    assert p.check("U0BLVK3L0AG") is ApproverStatus.AUTHORIZED
+    assert p.check("U0BLVK3L0AH") is ApproverStatus.NOT_ALLOWED
