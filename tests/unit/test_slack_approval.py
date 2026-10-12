@@ -74,7 +74,10 @@ def _record(kind, p, lv):
 def _bridge(lv, fake=None):
     fake = fake or FakeSlackTransport()
     runtime = SimpleNamespace(driver=lv.drv)
-    bridge = SlackApprovalBridge(runtime, lv.h.engine, DecisionConfig(), fake, ApprovalJournal())
+    # these tests are about how a (persistent) hold is rendered: draw it immediately; the display
+    # debounce of transient holds is covered in tests/unit/test_slack_outbox.py
+    bridge = SlackApprovalBridge(runtime, lv.h.engine, DecisionConfig(), fake, ApprovalJournal(),
+                                 hold_display_delay_s=0.0)
     bridge.start()
     return bridge, fake
 

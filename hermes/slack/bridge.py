@@ -8,13 +8,28 @@ The bridge is deliberately outside the deterministic decision core:
   so the fresh SafetyPolicy check reads a single-writer engine state;
 * Slack post/update and audit-file I/O happen on worker threads.
 
+Outbox semantics (one Slack message per proposal):
+
+* **latest state wins** — views of one proposal are coalesced while they wait for the worker, so a
+  burst of lifecycle records costs one Slack update, never a backlog of stale alternating states;
+* **transient holds are not displayed** — a VALID book is momentarily crossed / one-sided many
+  times per minute (measured on recorded MNQ data: ~0.5 / s, median 0.2 ms). Each such moment is a
+  correct TEMPORARY_HOLD for the decision core, but redrawing Slack for it made ENTER / REJECT
+  flicker about once per second. A hold is shown only if it is still in effect after
+  ``hold_display_delay_s``; a hold that cleared before then changes nothing visible. This is display
+  only: ENTER is always re-checked against the live state on the dispatch thread (a click during a
+  hold fails closed and the message is refreshed immediately);
+* **the setup view owns the message after its window closed** — a later CLOSED decision view never
+  overwrites the V1 Pro tracking view (it used to, depending on event order).
+
 ENTER is human intent only.  There is no broker import and no execution path.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from queue import Empty, Full, Queue, SimpleQueue
 from threading import Lock, Thread
 
@@ -57,11 +72,21 @@ _RELEVANT = frozenset(
 _TERMINAL = frozenset({"BLOCKED", "STALE", "INVALIDATED", "EXPIRED", "NONE"})
 
 
+HOLD_DISPLAY_DELAY_S = 1.0          # a temporary hold shorter than this is never drawn in Slack
+
+
 @dataclass(frozen=True, slots=True)
 class OutboundView:
     view: ApprovalPayload
     state: SlackWorkflowState
     banner: str | None = None
+    hold: str = ""                   # "entered" / "cleared" for TEMPORARY_HOLD_* records (display debounce)
+    at: float = 0.0                  # monotonic enqueue time
+
+
+@dataclass(frozen=True, slots=True)
+class _ViewToken:
+    proposal_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +116,10 @@ class SlackBridgeStats:
     rejects: int = 0
     unauthorized: int = 0
     setup_updates: int = 0
+    coalesced: int = 0               # views replaced by a newer state before delivery
+    holds_deferred: int = 0          # holds waiting for hold_display_delay_s
+    holds_suppressed: int = 0        # transient holds never drawn (cleared in time)
+    superseded: int = 0              # CLOSED views not drawn over the setup-tracking view
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -108,6 +137,10 @@ class SlackBridgeStats:
             "rejects": self.rejects,
             "unauthorized": self.unauthorized,
             "setup_updates": self.setup_updates,
+            "coalesced": self.coalesced,
+            "holds_deferred": self.holds_deferred,
+            "holds_suppressed": self.holds_suppressed,
+            "superseded": self.superseded,
         }
 
 
@@ -156,8 +189,12 @@ class SlackApprovalBridge:
         history_provider=None,
         note_provider=None,
         setup_interpreter=None,
+        hold_display_delay_s: float = HOLD_DISPLAY_DELAY_S,
+        clock=time.monotonic,
     ) -> None:
         self.runtime = runtime
+        self.hold_display_delay_s = max(0.0, float(hold_display_delay_s))
+        self._clock = clock
         self.engine = engine
         self.cfg = cfg
         self.transport = transport
@@ -195,6 +232,14 @@ class SlackApprovalBridge:
         self._message_refs: dict[str, SlackMessageRef] = {}
         self._displayed: dict[str, ApprovalPayload] = {}
 
+        # outbox state: _pending is shared (publisher thread -> worker); the rest is worker-thread only
+        self._pending_lock = Lock()
+        self._pending: dict[str, OutboundView] = {}
+        self._deferred: dict[str, tuple[float, OutboundView]] = {}
+        self._hold_since: dict[str, float] = {}
+        self._hold_shown: set[str] = set()
+        self._setup_views: dict[str, OutboundSetup] = {}
+
         self._seen_interactions: set[str] = set()
         self._seen_responses: set[tuple[str, str, str, str, str]] = set()
         self._human_closed: set[str] = set()
@@ -204,6 +249,8 @@ class SlackApprovalBridge:
             return
         self._started = True
         self.journal.start()
+        log.info("Slack TWS screenshot %s (HERMES_SCREENSHOT_ENABLED); posted as a thread reply",
+                 "enabled" if self.enrichment.enabled else "DISABLED")
         self.enrichment.start()
         self.chat.start()
         if self.interpretation is not None:
@@ -245,10 +292,13 @@ class SlackApprovalBridge:
             return
         if view.proposal_id in self._human_closed:
             return
+        hold = ""
         if record.kind is JournalKind.TEMPORARY_HOLD_ENTERED:
             state, banner = SlackWorkflowState.HOLD, "Temporary market-data hold — ENTER unavailable."
+            hold = "entered"
         elif record.kind is JournalKind.TEMPORARY_HOLD_CLEARED:
             state, banner = _state_for_view(view), "Temporary hold cleared; fresh approval view shown."
+            hold = "cleared"
         elif record.kind in {
             JournalKind.CANDIDATE_BLOCKED,
             JournalKind.CANDIDATE_STALE,
@@ -258,7 +308,7 @@ class SlackApprovalBridge:
             state, banner = SlackWorkflowState.CLOSED, f"Candidate {record.status or 'closed'} — ENTER disabled."
         else:
             state, banner = _state_for_view(view), None
-        self._enqueue(OutboundView(view, state, banner))
+        self._enqueue(OutboundView(view, state, banner, hold=hold, at=self._clock()))
 
     def publish_setup(self, event, view) -> None:
         """V1 Pro: queue a setup-tracking update of the proposal's existing message. Never posts a new
@@ -445,32 +495,108 @@ class SlackApprovalBridge:
             authorizes_execution=False,
         )
 
-    def _enqueue(self, item: OutboundView) -> None:
+    def _enqueue(self, item) -> None:
+        """Never blocks. Views of one proposal coalesce (latest state wins); setup updates keep order."""
+        if isinstance(item, OutboundView):
+            pid = item.view.proposal_id
+            with self._pending_lock:
+                waiting = pid in self._pending
+                self._pending[pid] = item
+            if waiting:
+                self.stats.coalesced += 1
+                self.stats.queued += 1
+                return
+            token: object = _ViewToken(pid)
+        else:
+            token = item
         try:
-            self._outbox.put_nowait(item)
+            self._outbox.put_nowait(token)
             self.stats.queued += 1
         except Full:
+            if isinstance(token, _ViewToken):
+                with self._pending_lock:
+                    self._pending.pop(token.proposal_id, None)
             self.stats.outbox_dropped += 1
             log.error(
                 "Slack outbox full; dropped update for proposal %s (market/decision core continues)",
-                item.view.proposal_id,
+                getattr(item, "proposal_id", None) or item.view.proposal_id,
             )
 
     def _run_outbox(self) -> None:
         while True:
-            item = self._outbox.get()
+            timeout = self._next_due_in()
+            try:
+                item = self._outbox.get() if timeout is None else self._outbox.get(timeout=timeout)
+            except Empty:
+                self._flush_due()
+                continue
             try:
                 if item is _STOP:
                     return
                 if isinstance(item, OutboundSetup):
                     self._deliver_setup(item)
-                else:
-                    assert isinstance(item, OutboundView)
-                    self._deliver(item)
+                elif isinstance(item, _ViewToken):
+                    with self._pending_lock:
+                        view = self._pending.pop(item.proposal_id, None)
+                    if view is not None:
+                        self._consider(view)
+                self._flush_due()
             finally:
                 self._outbox.task_done()
 
-    def _deliver_setup(self, item: OutboundSetup) -> None:
+    def _next_due_in(self) -> float | None:
+        if not self._deferred:
+            return None
+        return max(0.0, min(due for due, _ in self._deferred.values()) - self._clock())
+
+    def _flush_due(self) -> None:
+        now = self._clock()
+        for pid, (due, item) in list(self._deferred.items()):
+            if now >= due:
+                del self._deferred[pid]
+                self._show(item)
+
+    def _consider(self, item: OutboundView) -> None:
+        """Worker thread: decide whether this (latest) view changes what Slack must show."""
+        pid = item.view.proposal_id
+        self._deferred.pop(pid, None)                     # a newer state supersedes a waiting hold
+        setup = self._setup_views.get(pid)
+        if setup is not None:
+            # the message now shows the setup-tracking view: never redraw the closed proposal over it
+            if item.state is SlackWorkflowState.CLOSED:
+                self.stats.superseded += 1
+            else:
+                self._deliver_setup(setup, interpret=False)   # re-render with the human action
+            return
+        if item.hold == "entered" and item.state is SlackWorkflowState.HOLD:
+            since = self._hold_since.setdefault(pid, item.at)
+            due = since + self.hold_display_delay_s
+            if pid not in self._hold_shown and self._clock() < due:
+                self._deferred[pid] = (due, item)
+                self.stats.holds_deferred += 1
+                return
+            self._show(item)
+            return
+        self._hold_since.pop(pid, None)
+        if item.hold == "cleared" and pid not in self._hold_shown:
+            with self._display_lock:
+                posted = pid in self._message_refs
+            if posted:
+                self.stats.holds_suppressed += 1          # the hold was never drawn: nothing changed
+                return
+            item = replace(item, banner=None)
+        self._show(item)
+
+    def _show(self, item: OutboundView) -> None:
+        pid = item.view.proposal_id
+        if self._deliver(item):
+            if item.state is SlackWorkflowState.HOLD:
+                self._hold_shown.add(pid)
+            else:
+                self._hold_shown.discard(pid)
+                self._hold_since.pop(pid, None)
+
+    def _deliver_setup(self, item: OutboundSetup, interpret: bool = True) -> None:
         with self._display_lock:
             ref = self._message_refs.get(item.proposal_id)
         if ref is None:
@@ -483,7 +609,9 @@ class SlackApprovalBridge:
             log.error("Slack setup update failed for %s: %s", item.proposal_id, exc)
             return
         self.stats.setup_updates += 1
-        if self.interpretation is not None and item.kind in ("WINDOW_CLOSED", "REARMED"):
+        self._setup_views[item.proposal_id] = item
+        self._deferred.pop(item.proposal_id, None)
+        if interpret and self.interpretation is not None and item.kind in ("WINDOW_CLOSED", "REARMED"):
             self.interpretation.submit(ref, item.view)
 
     def _provided(self, provider, p):
@@ -495,7 +623,7 @@ class SlackApprovalBridge:
             log.exception("Slack provider failed; message rendered without it")
             return None
 
-    def _deliver(self, item: OutboundView) -> None:
+    def _deliver(self, item: OutboundView) -> bool:
         p = item.view
         fresh = item.state is SlackWorkflowState.ACTIVE
         msg = render_slack_message(p, workflow_state=item.state, banner=item.banner,
@@ -509,25 +637,29 @@ class SlackApprovalBridge:
             except Exception as exc:  # noqa: BLE001
                 self.stats.post_failures += 1
                 log.error("Slack post failed for %s: %s", p.proposal_id, exc)
-                return
+                return False
             with self._display_lock:
                 self._message_refs[p.proposal_id] = new_ref
                 self._displayed[p.proposal_id] = p
             self.stats.posts += 1
 
-            if p.status == "ACTIONABLE" and p.approval_allowed_now:
+            # The screenshot is visual context only (it authorizes nothing): take it for every proposal
+            # posted while ACTIONABLE, even if a transient hold happened to be in effect at that instant.
+            if p.status == "ACTIONABLE":
                 self.enrichment.submit(p, new_ref)
-
-            return
+            else:
+                log.info("Slack screenshot skipped for %s: posted as %s", p.proposal_id, p.status)
+            return True
         try:
             self.transport.update(ref, msg)
         except Exception as exc:  # noqa: BLE001
             self.stats.update_failures += 1
             log.error("Slack update failed for %s: %s", p.proposal_id, exc)
-            return
+            return False
         with self._display_lock:
             self._displayed[p.proposal_id] = p
         self.stats.updates += 1
+        return True
 
     def displayed_view(self, proposal_id: str) -> ApprovalPayload | None:
         with self._display_lock:
