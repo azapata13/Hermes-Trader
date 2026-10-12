@@ -159,3 +159,12 @@ def test_setup_report_tool_prints_definitions_and_separates_real(tmp_path, capsy
     out = capsys.readouterr().out
     assert "never P&L" in out and "REAL TRADES      none executed" in out
     assert "STALE/EXPIRED then +20 pt   3" in out and "continuation = +1R" in out
+
+
+def test_older_rows_without_optional_fields_stay_usable():
+    old = row("S1")
+    del old["horizons_s"]
+    old.pop("features")
+    s = outcome_stats([old, row("S2")])
+    assert s.samples == 2 and s.median_result_5m_pt == 6.0      # default horizons assumed for v1 rows
+    assert comparable(FEAT, [old]).stats.samples == 0             # no characteristics -> never comparable

@@ -292,3 +292,67 @@ def test_rearm_links_only_one_monitoring_setup_and_only_once():
 def test_opposite_direction_candidate_does_not_rearm():
     t = SetupTracker()
     assert t._rearm_candidate("SHORT", 0) is None
+
+
+# ============================================================================ reconnect / restart / warm start
+
+def test_connection_loss_closes_the_window_then_marks_the_outcome_incomplete():
+    r, rec = started()
+    r.print_at(605, rec.candidate.entry_reference + 8)
+    r.at(606)
+    r.sc.error(-1, 1100)                                     # connectivity lost: C9 BLOCKED, tape epoch breaks
+    r.pump()
+    r.tick_until(610)
+    v = view(r, rec)
+    assert r.rt.driver.lifecycle.get(rec.setup_id).status is CandidateStatus.BLOCKED
+    assert v.outcome.status is OutcomeStatus.INCOMPLETE and v.outcome.incomplete_reason == "tape_continuity_broken"
+    assert v.outcome.mfe_units == 8                          # what was measured before the gap is kept as-is
+
+
+def test_process_restart_starts_empty_and_previous_setups_are_recorded_incomplete(tmp_path):
+    from hermes.analytics.stats import outcome_stats
+    from hermes.analytics.store import SetupStore
+    r, rec = started()
+    store = SetupStore(tmp_path / "setups.jsonl")
+    store.start()
+    r.rt.setups.on_event = lambda e, v: store.add(v.row()) if e.kind == "OUTCOME_FINAL" else None
+    r.rt.finalize()                                          # process stops with the setup still open
+    store.close()
+    again = SetupStore(tmp_path / "setups.jsonl")            # the next process
+    assert [x["setup_id"] for x in again.rows] == [rec.setup_id]
+    assert again.rows[0]["outcome"]["incomplete_reason"] == "session_ended"
+    assert outcome_stats(again.rows).samples == 0            # incomplete: never in statistics
+    fresh = DecisionRuntime(Harness().engine)
+    assert fresh.setups.open == {} and fresh.setups.by_id == {}
+
+
+def test_warm_history_alone_never_creates_a_tracked_setup(tmp_path):
+    import os
+    from unittest import mock
+
+    from hermes.replay.warm_start import warm_start_engine
+    from tests.support import SPEC, write_hrec
+    rec_script = trend(+1, minutes=11)
+    root = tmp_path / "rec"
+    write_hrec(root / "2026-10-01" / "s1", rec_script.events, meta={"contract_spec": dict(SPEC.to_params())})
+    h = Harness()
+    with mock.patch.dict(os.environ, {"HERMES_WARM_START": "1"}):
+        res = warm_start_engine(h.engine, root, expected_contract_spec=dict(SPEC.to_params()),
+                                max_age_s=10**12, now_mono_ns=10**12)
+    assert res.used
+    rt = DecisionRuntime(h.engine)                           # live decision layer starts AFTER the warm start
+    assert rt.setups.by_id == {} and rt.setups.events == []
+
+
+def test_idle_tracking_cost_is_constant():
+    import time as _t
+    t = SetupTracker()
+    eng = Harness().engine
+
+    class _R:
+        def __init__(self, s):
+            self.seq, self.recv_wall_ns = s, s
+    t0 = _t.perf_counter()
+    for s in range(1, 200_001):
+        t.after_event(eng, _R(s))
+    assert _t.perf_counter() - t0 < 1.0                      # O(1) per event when nothing is tracked
