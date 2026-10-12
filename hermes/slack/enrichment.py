@@ -212,6 +212,18 @@ def _analyze_sol(p: ApprovalPayload, luna_text: str) -> str:
     return response.output_text.strip()
 
 
+def sol_complete(prompt: str) -> str:
+    """V1 Pro D8: one Sol completion for a structured, engine-built prompt (text in, text out).
+    Only called off the critical threads when HERMES_AI_ENABLED and OPENAI_API_KEY are set; the
+    caller guards the output (hermes.analytics.llm_context.guard_output) before display."""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    response = client.responses.create(
+        model=os.getenv("HERMES_SOL_MODEL", "gpt-5.6-sol"), input=prompt, max_output_tokens=220)
+    return response.output_text.strip()
+
+
 class VisualEnrichmentWorker:
     def __init__(self, transport, max_queue: int = 32) -> None:
         self.transport = transport

@@ -29,6 +29,7 @@ class FakeSlackTransport:
         self.posts: list[tuple[SlackMessageRef, SlackMessage]] = []
         self.updates: list[tuple[SlackMessageRef, SlackMessage]] = []
         self.uploads: list[tuple[SlackMessageRef, str, str, str]] = []
+        self.replies: list[tuple[str, str, str]] = []
         self._handler: InteractionHandler | None = None
         self._lock = Lock()
         self.started = False
@@ -72,6 +73,10 @@ class FakeSlackTransport:
     ) -> None:
         with self._lock:
             self.uploads.append((ref, path, title, initial_comment))
+
+    def reply_text(self, channel_id: str, thread_ts: str, text: str) -> None:
+        with self._lock:
+            self.replies.append((channel_id, thread_ts, text))
 
     def emit(self, interaction: SlackInteraction) -> None:
         if self._handler is None:

@@ -30,6 +30,7 @@ from hermes.slack.approvers import ApproverPolicy
 from hermes.slack.chat import ConversationalWorker
 from hermes.slack.enrichment import VisualEnrichmentWorker
 from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
+from hermes.slack.pro import InterpretationWorker
 from hermes.slack.protocol import (
     SlackAction,
     SlackInteraction,
@@ -154,6 +155,7 @@ class SlackApprovalBridge:
         approvers: ApproverPolicy | None = None,
         history_provider=None,
         note_provider=None,
+        setup_interpreter=None,
     ) -> None:
         self.runtime = runtime
         self.engine = engine
@@ -165,6 +167,8 @@ class SlackApprovalBridge:
         self.history_provider = history_provider             # ApprovalPayload -> history stat | None (>= 30 only)
         self.note_provider = note_provider                   # ApprovalPayload -> one-line re-arm note | None
         self._human_actions: dict[str, str] = {}
+        # D8: optional LLM interpretation of setup transitions, posted as a thread reply (display only)
+        self.interpretation = InterpretationWorker(transport, setup_interpreter) if setup_interpreter else None
         self.enrichment = VisualEnrichmentWorker(transport)
 
         if market_context_provider is None:
@@ -202,6 +206,8 @@ class SlackApprovalBridge:
         self.journal.start()
         self.enrichment.start()
         self.chat.start()
+        if self.interpretation is not None:
+            self.interpretation.start()
         self._worker = Thread(target=self._run_outbox, name="hermes-slack-outbox", daemon=True)
         self._worker.start()
         try:
@@ -227,6 +233,8 @@ class SlackApprovalBridge:
                 log.warning("Slack outbox worker did not stop within %.1fs", timeout)
         self.chat.close()
         self.enrichment.close()
+        if self.interpretation is not None:
+            self.interpretation.close(timeout)
         self.journal.close(timeout)
         self._worker = None
         self._started = False
@@ -475,6 +483,8 @@ class SlackApprovalBridge:
             log.error("Slack setup update failed for %s: %s", item.proposal_id, exc)
             return
         self.stats.setup_updates += 1
+        if self.interpretation is not None and item.kind in ("WINDOW_CLOSED", "REARMED"):
+            self.interpretation.submit(ref, item.view)
 
     def _provided(self, provider, p):
         if provider is None:
@@ -538,6 +548,7 @@ class SlackApprovalBridge:
                 "journal_dropped": self.journal.dropped,
                 "human_closed": len(self._human_closed),
                 "visual_enrichment": self.enrichment.summary(),
+                "interpretation": self.interpretation.summary() if self.interpretation is not None else None,
                 "conversation": self.chat.summary(),
             }
         )

@@ -25,6 +25,8 @@ from typing import Any
 import ibapi
 
 import hermes
+from hermes.analytics.llm_context import build_context, interpret
+from hermes.analytics.stats import comparable
 from hermes.analytics.store import SetupStore
 from hermes.config import DEFAULT_CONFIG_PATH, ConfigError, HermesConfig, load_config
 from hermes.core.logging_setup import setup_logging
@@ -45,6 +47,7 @@ from hermes.replay.setups import SETUPS_SIDECAR, save_setups
 from hermes.replay.warm_start import WarmStartResult, warm_start_engine
 from hermes.slack.approvers import ApproverConfigError, ApproverPolicy
 from hermes.slack.bridge import SlackApprovalBridge
+from hermes.slack.enrichment import sol_complete
 from hermes.slack.journal import ApprovalJournal
 from hermes.slack.pro import history_for, rearm_note
 from hermes.slack.socket_mode import (
@@ -68,6 +71,11 @@ _SLACK_VIEW_KINDS = frozenset({
     JournalKind.CANDIDATE_INVALIDATED,
     JournalKind.CANDIDATE_EXPIRED,
 })
+
+
+def _ai_enabled() -> bool:
+    return (os.getenv("HERMES_AI_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+            and bool(os.getenv("OPENAI_API_KEY")))
 
 
 def git_commit() -> str:
@@ -189,6 +197,7 @@ class LiveRuntime:
                         approvers=approvers,
                         history_provider=self._slack_history,
                         note_provider=self._slack_note,
+                        setup_interpreter=self._setup_interpreter if _ai_enabled() else None,
                     )
                     # D1: process already-ACKed Slack intents on the same single-writer dispatch thread,
                     # AFTER DecisionRuntime has applied the current market event.
@@ -323,6 +332,12 @@ class LiveRuntime:
 
     def _slack_history(self, p):
         return history_for(self.decisions.setups if self.decisions else None, lambda: self.setup_store.rows, p)
+
+    def _setup_interpreter(self, view) -> list[str]:
+        """D8 (Sol thread, never the dispatch thread): engine facts -> context -> Sol -> guarded lines."""
+        ctx = build_context(view, comparable(view.features, list(self.setup_store.rows),
+                                             exclude_setup_id=view.setup_id), time.time_ns())
+        return interpret(ctx, sol_complete).lines
 
     def _slack_note(self, p):
         return rearm_note(self.decisions.setups if self.decisions else None, p)
