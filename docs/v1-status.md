@@ -1,6 +1,6 @@
 # Hermès V1 — status
 
-**State: V1 CODE-COMPLETE — LIVE VALIDATION PENDING.**
+**State: V1 PRO CODE-COMPLETE — LIVE VALIDATION PENDING.** V1 Pro details: `docs/v1-pro.md`.
 
 V1 is a deterministic, observable, fail-closed, read-only MNQ order-flow assistant. It
 proposes setups to a human in Slack and **stops there**. It is not an execution system.
@@ -14,6 +14,10 @@ proposes setups to a human in Slack and **stops there**. It is not an execution 
 | D2.6 layered health, resync reasons, warm start in the summary | done | integration |
 | D2.7 live contract identity must match the warm-start history | done | `test_warm_start_health.py` |
 | D2.8 Slack approver allowlist | done | `tests/unit/test_slack_approvers.py` |
+| D3/D4/D6 setup tracking after the entry window, shadow MFE/MAE, re-arm links | done | `tests/unit/test_setup_tracking.py`, live/replay integration |
+| D5/D7 shadow / missed setups, statistics, similarity (>= 30) | done | `tests/unit/test_analytics.py` |
+| D8 LLM context + output guard (no path LLM -> action) | done | `tests/unit/test_llm_context.py`, `tests/safety/test_llm_isolation.py` |
+| D9 Slack setup messages (no entry), recorded History, re-arm note | done | `tests/unit/test_slack_pro.py` |
 | Live TWS / MNQZ6 / L2 DOM / real candidate / Slack / screenshot | **NOT LIVE-VERIFIED** | `docs/live-validation.md` §9 |
 
 ## Architecture
@@ -30,7 +34,9 @@ hermes/decision DecisionContext → SetupCandidate → LifecycleTracker → Safe
                 HumanApprovalResponse (intent only; execution prerequisites always fail in V1)
 hermes/slack    SlackApprovalBridge (outbox thread, Socket Mode), D1.9 renderer, approver allowlist,
                 approval journal, TWS screenshot + optional Luna/Sol notes (never on the safety path)
-hermes/replay   deterministic replay, market checkpoints, decision journal comparison, warm start
+hermes/decision tracking.py / features.py (V1 Pro): setup phases, shadow outcome, re-arm, characteristics
+hermes/analytics (V1 Pro) setups.jsonl store, outcome statistics, similarity, LLM context + guard
+hermes/replay   deterministic replay, market checkpoints, decision journal + setups.json comparison, warm start
 hermes/app      run_live.py: LiveRuntime wiring, telemetry, run summary
 ```
 

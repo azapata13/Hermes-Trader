@@ -70,6 +70,7 @@ Never print, log or commit the values. `scripts/start_hermes.sh` is intentionall
 | `HERMES_SOL_ON_COMPLEX` | no | `1` | Sol only on conflicting setups |
 | `HERMES_SLACK_JOURNAL` | no | `~/hermes-data/logs/human_approvals.jsonl` | append-only approval journal |
 | `HERMES_SLACK_CHAT_JOURNAL` | no | `~/hermes-data/logs/slack_chat.jsonl` | conversational journal |
+| `HERMES_SETUP_STORE` | no | `~/hermes-data/setups/setups.jsonl` | finished setups (shadow outcomes) used by History / reports |
 | `HERMES_WARM_START` | no | `1` | `0` disables the warm start (cold start) |
 | `HERMES_WARM_START_MAX_AGE_S` | no | `43200` | newest recording older than this is ignored |
 
@@ -181,13 +182,32 @@ Approval behavior to observe (**REJECT only, never ENTER**):
 - With `HERMES_SLACK_APPROVER_IDS` set, a click from anyone else changes nothing. It appears in
   `human_approvals.jsonl` with `approver_not_allowed` (D2.8).
 
+## 7b. V1 Pro checks (setup tracking — shadow, never P&L)
+
+On a real candidate whose window closes without ENTER:
+
+- The same Slack message turns into `👁 SETUP MONITORING`: no buttons, original entry / SL, MFE / MAE,
+  "Old entry NOT available. A fresh 30 s trigger is required".
+- If a new same-direction candidate is validated later, a new D1.9 proposal appears with a
+  `↻ Re-arm of an earlier …` line, and the old message shows `↻ SETUP RE-ARMED`.
+- `hermes.log` shows `SETUP TRACKED / WINDOW_CLOSED / REARMED / OUTCOME_FINAL` lines.
+- At shutdown, `<session>/setups.json` is written. Each finished setup is appended to
+  `~/hermes-data/setups/setups.jsonl`.
+- With `HERMES_AI_ENABLED=1`, a Sol thread reply prefixed "interpretation only (no authority, no
+  order)" may appear. Every number in it must also appear in the engine facts.
+- History stays hidden until ≥ 30 comparable recorded setups exist.
+
 ## 8. Stop and verify
 
 ```bash
 # Ctrl-C in the Hermès terminal, then:
 python tools/replay_report.py "$(ls -td ~/hermes-data/recordings/*/* | head -1)" --verify
 python tools/depth_report.py  "$(ls -td ~/hermes-data/recordings/*/* | head -1)"
+python tools/setup_report.py                       # shadow / missed setups (never P&L)
 ```
+
+`replay_report --verify` also prints a SETUPS section. Its setup-tracking comparison must be
+`EQUIVALENT`, or "not applicable" for recordings made before V1 Pro.
 
 `replay_report --verify` must show market and decision equivalence (`EQUIVALENT`).
 
