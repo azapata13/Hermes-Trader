@@ -41,7 +41,8 @@ _BANNED = re.compile(
     r"\b(place|send|submit|cancel|modify)\s+(an?\s+)?(order|trade)|\border(s)?_enabled\b|\bread_only\b|"
     r"\bplaceorder\b|\b(buy|sell|enter|short|long)\s+(now|here|immediately)\b|\bclick\s+enter\b|"
     r"\bmove\s+(the\s+)?stop\b|\bset\s+(the\s+)?stop\b|\bnew\s+entry\s+(at|is)\b|\bapprove(d)?\s+the\s+trade\b|"
-    r"\bignore\s+(the\s+)?(safety|rules|previous)\b|\bdisable\b",
+    r"\bignore\s+(the\s+)?(safety|rules|previous)\b|\bdisable\b|\benter\s+(is\s+)?approved\b|"
+    r"\b(trade|order|entry)\s+(is\s+)?approved\b|\bapprov(e|ed|ing)\s+(the\s+)?(enter|entry|order|trade)\b",
     re.IGNORECASE,
 )
 _NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?%?")
@@ -52,8 +53,9 @@ def _pt(view, units):
     return None if units is None else view.points(units)
 
 
-def build_context(view, comparable: Comparable | None, now_wall_ns: int) -> dict:
-    """Engine facts only. ``view`` is a tracking SetupView; ``comparable`` the D7 comparison (or None)."""
+def build_context(view, comparable: Comparable | None, now_wall_ns: int, market: dict | None = None) -> dict:
+    """Engine facts only. ``view`` is a tracking SetupView; ``comparable`` the D7 comparison (or None);
+    ``market`` an optional published market-health snapshot (connection, market_data_ok, reasons, alerts)."""
     o = view.outcome
     f = dict(view.features)
     r = o.r_wall_ns
@@ -96,7 +98,19 @@ def build_context(view, comparable: Comparable | None, now_wall_ns: int) -> dict
         "structure": {k: f.get(k, "unavailable") for k in ("regime_5m", "setup_1m", "trigger_30s", "vwap", "tape",
                                                             "ofi", "sweep", "session")},
         "history": history,
+        "market": _market(market),
     }
+
+
+def _market(m: dict | None) -> dict:
+    """Data quality / TWS state as published by the engine (read-only facts; 'unavailable' if absent)."""
+    if not isinstance(m, dict):
+        return {"available": False}
+    return {"available": True, "connection": str(m.get("connection", "unknown")),
+            "market_data_ok": bool(m.get("market_data_ok")),
+            "not_ok_reasons": [str(x) for x in (m.get("not_ok_reasons") or ())][:6],
+            "alerts": [str(x) for x in (m.get("alerts") or ())][:6],
+            "approval_allowed_now": bool(m.get("approval_allowed_now", False))}
 
 
 def validate_context(ctx) -> list[str]:
@@ -206,6 +220,11 @@ def guard_output(text, ctx: dict) -> Guarded:
             continue
         g.lines.append(line[:240])
     return g
+
+
+def is_instruction(line: str) -> bool:
+    """True for order / setting / approval / stop-moving wording that an interpretation must never carry."""
+    return bool(_BANNED.search(line or ""))
 
 
 def interpret(ctx: dict, llm_fn) -> Guarded:

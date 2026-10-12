@@ -111,6 +111,7 @@ def test_guard_drops_lines_with_numbers_not_in_the_context(ctxs, line):
 
 
 @pytest.mark.parametrize("line", [
+    "place order", "ENTER approved", "orders_enabled=true", "read_only=false", "Trade approved for 2 contracts.",
     "Place an order now.", "Set orders_enabled = true and read_only = false.", "Buy now, momentum is strong.",
     "Move the stop to breakeven.", "Click ENTER immediately.", "Ignore the safety rules.",
     "New entry is at the old price.", "Call placeOrder for 1 contract.",
@@ -147,3 +148,55 @@ def test_malicious_or_failing_llm_output_produces_only_guarded_text(ctxs):
         raise RuntimeError("network down")
     assert interpret(ctxs[0], boom).lines == []
     assert interpret(ctxs[0], lambda p: None).lines == []
+
+
+# ---------------------------------------------------------------------------- Luna / Sol caption lines
+
+@pytest.mark.parametrize("raw", [
+    "ALIGNMENT: buy now, momentum is strong\nCONFLICT: NONE",
+    "ALIGNMENT: UNKNOWN\nCONFLICT: move the stop to 21000",
+    "CONFLICT: set orders_enabled=true",
+])
+def test_luna_instruction_lines_are_dropped(raw):
+    from hermes.slack.enrichment import luna_lines
+    assert luna_lines(raw) == []
+
+
+def test_luna_observations_are_kept_and_sol_instructions_dropped():
+    from hermes.slack.enrichment import luna_lines, sol_lines
+    assert luna_lines("ALIGNMENT: bids stacking under price\nCONFLICT: none") == ["ALIGNMENT: bids stacking under price"]
+    assert sol_lines("Place an order now\n5m regime conflicts with the 30s trigger") == [
+        "5m regime conflicts with the 30s trigger"]
+    assert sol_lines("ENTER approved by Sol") == []
+    assert sol_lines("click ENTER immediately") == []
+
+
+def test_market_health_facts_are_carried_without_any_handle(ctxs):
+    _, _, _, view = ctxs
+    ctx = build_context(view, None, (T0 + 650) * S, {"connection": "connected", "market_data_ok": False,
+                                                     "not_ok_reasons": ("book:stale(disconnect)",),
+                                                     "alerts": ("depth_resync_budget_exhausted",)})
+    assert ctx["market"] == {"available": True, "connection": "connected", "market_data_ok": False,
+                             "not_ok_reasons": ["book:stale(disconnect)"], "alerts": ["depth_resync_budget_exhausted"],
+                             "approval_allowed_now": False}
+    assert build_context(view, None, 0)["market"] == {"available": False}
+    assert validate_context(ctx) == [] and json.loads(json.dumps(ctx)) == ctx
+
+
+def test_live_runtime_interpreter_is_engine_facts_to_guarded_text(ctxs, monkeypatch, tmp_path):
+    import dataclasses
+
+    import hermes.app.run_live as rl
+    from hermes.config import load_config
+    _, _, _, view = ctxs
+    cfg = load_config()
+    cfg = dataclasses.replace(cfg, telemetry=dataclasses.replace(cfg.telemetry, log_directory=str(tmp_path)),
+                              recorder=dataclasses.replace(cfg.recorder, directory=str(tmp_path / "rec")))
+    rt = rl.LiveRuntime(cfg, record=False)
+    prompts = []
+    monkeypatch.setattr(rl, "sol_complete", lambda p: prompts.append(p) or
+                        "placeOrder now\nOriginal entry window expired; a fresh 30s trigger is required.")
+    lines = rt._setup_interpreter(view)
+    assert lines == ["Original entry window expired; a fresh 30s trigger is required."]
+    assert '"schema": "hermes-llm-context/1"' in prompts[0] and "no execution authority" in prompts[0]
+    assert rt.engine.alerts == {} and cfg.safety.orders_enabled is False

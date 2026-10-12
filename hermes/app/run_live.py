@@ -335,8 +335,13 @@ class LiveRuntime:
 
     def _setup_interpreter(self, view) -> list[str]:
         """D8 (Sol thread, never the dispatch thread): engine facts -> context -> Sol -> guarded lines."""
+        snap = self.publisher.latest()                 # published snapshot: safe to read off the dispatch thread
+        inst = snap.instruments[0] if snap is not None and snap.instruments else None
+        market = None if snap is None else {
+            "connection": snap.connection.value, "market_data_ok": bool(inst and inst.market_data_ok),
+            "not_ok_reasons": inst.not_ok_reasons if inst else ("no instrument",), "alerts": snap.alerts}
         ctx = build_context(view, comparable(view.features, list(self.setup_store.rows),
-                                             exclude_setup_id=view.setup_id), time.time_ns())
+                                             exclude_setup_id=view.setup_id), time.time_ns(), market)
         return interpret(ctx, sol_complete).lines
 
     def _slack_note(self, p):

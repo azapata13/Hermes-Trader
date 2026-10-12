@@ -8,6 +8,7 @@ from pathlib import Path
 from queue import Full, Queue
 from threading import Thread
 
+from hermes.analytics.llm_context import is_instruction
 from hermes.decision.approval import ApprovalPayload
 from hermes.slack.protocol import SlackMessageRef
 
@@ -152,8 +153,8 @@ def luna_lines(text: str | None) -> list[str]:
         if key.strip().upper() not in ("ALIGNMENT", "CONFLICT"):
             continue
         v = val.strip()
-        if not v or v.upper().rstrip(".") in ("NONE", "UNKNOWN", "N/A"):
-            continue
+        if not v or v.upper().rstrip(".") in ("NONE", "UNKNOWN", "N/A") or is_instruction(v):
+            continue                                   # Luna observes; it never instructs (dropped)
         out.append(f"{key.strip().upper()}: {v[:_MAX_NOTE_CHARS]}")
     return out[:2]
 
@@ -163,7 +164,8 @@ def sol_lines(text: str | None) -> list[str]:
     t = (text or "").strip()
     if not t or t.upper().rstrip(".") == "NONE":
         return []
-    return [line.strip()[:_MAX_NOTE_CHARS] for line in t.splitlines() if line.strip()][:2]
+    return [line.strip()[:_MAX_NOTE_CHARS] for line in t.splitlines()
+            if line.strip() and not is_instruction(line)][:2]
 
 
 def screenshot_caption(p: ApprovalPayload, luna_text: str | None = None, sol_text: str | None = None) -> str:
