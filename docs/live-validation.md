@@ -127,6 +127,43 @@ In this order:
 6. `Slack approvers: N approver(s)`, or `not configured (ENTER can be recorded as intent but never
    authorizes execution)` (D2.8).
 
+### 5b. One instance per TWS clientId (live incident: "attempt 143")
+
+TWS accepts one API session per clientId. A second Hermès with the same `host:port:clientId` gets
+TWS error 326 and no `nextValidId`, then retries for ever. The healthy instance is not disturbed,
+but both write to the same console, logs and data directory, and both open a Socket Mode connection
+to the same Slack app. Slack spreads button clicks across those connections, so a click can reach
+the process that knows nothing about the proposal.
+
+- **Guard.** A live process takes an exclusive lock `~/hermes-data/run/tws-<host>-<port>-client<id>.lock`
+  (override the directory with `HERMES_LOCK_DIR`). A second one refuses to start with
+  `HERMÈS NOT STARTED: another Hermès instance already holds … (pid=…)` and exit code 3. The kernel
+  releases the lock when a process dies, even after `kill -9`, so a leftover file never blocks.
+- **Every log line carries `p<pid>`.** Two pids in one console mean two processes.
+- **The periodic console line** (`CONNECTED | MNQZ6 book=… | dec eval=…`, every
+  `report_interval_s`) reports engine health. It is not a connection event. Connection events are
+  `connecting to TWS … (attempt N)`, `TWS connection lost` and `reconnecting in …`.
+- **If 326 is reported anyway**, another application (or a Hermès using a different data directory)
+  holds the clientId:
+  - a single WARNING right after a restart is TWS still closing the previous socket;
+  - CRITICAL lines that repeat need action.
+  - Find the other process: `ps -axo pid,ppid,lstart,command | grep -i hermes`, and check the TWS
+    API connection list.
+
+### 5c. Slack messages
+
+- **Brief temporary holds are not drawn.** A VALID book is momentarily crossed several times a
+  minute (recorded MNQ: about one crossing every 2 s, median 0.2 ms).
+  - A hold appears in Slack only if it lasts at least 1 s; shorter ones change nothing visible.
+    ENTER / REJECT no longer flicker.
+  - ENTER is still re-checked against the live state when clicked: a click during a hold fails
+    closed, and the message is redrawn immediately.
+- **The TWS screenshot is a thread reply** under the proposal, not part of the message.
+  - It needs `HERMES_SCREENSHOT_ENABLED=1`; the startup log says `Slack TWS screenshot enabled|DISABLED`.
+  - It also needs macOS Screen Recording permission for the terminal running Hermès, and the Slack
+    `files:write` scope.
+  - Failures are logged as `visual enrichment failed for <proposal>` with the reason.
+
 ## 6. Health layers: do not mix them
 
 | Layer | Meaning | Where to read it |
