@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from hermes.analytics.outcome import RealTradeStore, performance_report
 from hermes.analytics.stats import OUTCOME_DEFINITION, excursion_quality, missed_report
 from hermes.analytics.store import DEFAULT_STORE, load_rows
 
@@ -51,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("source", nargs="?", default=DEFAULT_STORE)
     ap.add_argument("--approvals", default="~/hermes-data/logs/human_approvals.jsonl")
     ap.add_argument("--top", type=int, default=10, help="best shadow setups by excursion quality")
+    ap.add_argument("--real", default=None, help="real_trades.jsonl (default ~/hermes-data/trades/real_trades.jsonl)")
     args = ap.parse_args(argv)
     rows, note = _rows(Path(args.source).expanduser())
     approvals = _approvals(Path(args.approvals).expanduser() if args.approvals else None)
@@ -60,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"approvals        {len(approvals)} journal entries")
     print(f"definition       {OUTCOME_DEFINITION}")
     for line in rep.lines():
+        print(line)
+    real, bad = RealTradeStore(args.real).load()
+    print("----------- PERFORMANCE: decision-time vs post-setup SHADOW vs REAL (never mixed) -----------")
+    for line in performance_report(rows, approvals, real, bad).lines():
         print(line)
     best = sorted(((excursion_quality(r), r) for r in rows if excursion_quality(r) is not None),
                   key=lambda x: (-x[0], x[1]["setup_id"]))[: args.top]

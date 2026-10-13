@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from hermes.analytics.outcome import disposition_text, shadow_result, shadow_result_lines
 from hermes.decision.approval import ApprovalPayload
 from hermes.slack.protocol import (
     ENTER_ACTION_ID,
@@ -180,6 +181,10 @@ def render_setup_message(view, kind: str, *, human: str | None = None) -> SlackM
                      f"+2R {_yn(len(r) > 1 and r[1] is not None)} · stop-first "
                      f"{_yn(o.stop_touched and not (r and r[0] is not None))}"
                      + (f" · {o.incomplete_reason}" if o.incomplete_reason else ""))
+        # V1 Pro: SHADOW RESULT (points, +10/+20/+30, outcome rule) — never presented as a trade or P&L
+        lines.append("")
+        lines.extend(shadow_result_lines(shadow_result(view.row()),
+                                         disposition_text(human, view.window_close_status)))
     if human:
         lines.append(f"Human: {human}")
     blocks = [_section("\n".join(_esc(x) for x in lines)),

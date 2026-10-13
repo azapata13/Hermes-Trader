@@ -55,7 +55,11 @@ def test_final_message_reports_shadow_outcome_without_profit_language():
     final = r.tracker.get(old.setup_id)
     text = render_text(render_setup_message(final, "OUTCOME_FINAL", human="REJECT recorded"))
     assert "SETUP ENDED" in text and "+1R" in text and "Human: REJECT recorded" in text
-    assert "profit" not in text.lower() and "p&l" not in text.lower()
+    # V1 Pro: the SHADOW RESULT block, always labelled; "P&L" only appears inside "NOT REAL P&L"
+    assert "⚪ SETUP NOT TAKEN — rejected" in text and "SHADOW RESULT" in text and "+10: NO" in text
+    assert "SHADOW ONLY — NOT REAL P&amp;L" in text                     # Slack mrkdwn escapes "&"
+    low = text.lower().replace("not real p&amp;l", "")
+    assert "profit" not in low and "p&amp;l" not in low and "p&l" not in low
 
 
 # ---------------------------------------------------------------------------- providers
