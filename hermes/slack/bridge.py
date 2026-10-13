@@ -28,10 +28,11 @@ ENTER is human intent only.  There is no broker import and no execution path.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass, replace
 from queue import Empty, Full, Queue, SimpleQueue
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 from hermes.decision.approval import ApprovalPayload, current_approval_payload
 from hermes.decision.response import (
@@ -194,7 +195,14 @@ class SlackApprovalBridge:
         setup_interpreter=None,
         hold_display_delay_s: float = HOLD_DISPLAY_DELAY_S,
         clock=time.monotonic,
+        connect_retry_initial_s: float = 5.0,
+        connect_retry_max_s: float = 60.0,
     ) -> None:
+        self.connect_retry_initial_s = connect_retry_initial_s
+        self.connect_retry_max_s = connect_retry_max_s
+        self.slack_connected = False                  # Socket Mode transport started (read by status/summary)
+        self._connect_stop = Event()
+        self._connector: Thread | None = None
         self.runtime = runtime
         self.hold_display_delay_s = max(0.0, float(hold_display_delay_s))
         self._clock = clock
@@ -268,15 +276,49 @@ class SlackApprovalBridge:
             self.interpretation.start()
         self._worker = Thread(target=self._run_outbox, name="hermes-slack-outbox", daemon=True)
         self._worker.start()
+        # First attempt inline (so a healthy start is immediate and deterministic). If it fails, retry in the
+        # background with bounded backoff: a single transient failure at boot (launchd before the network,
+        # Slack API hiccup) used to leave the process running with Slack permanently OFF.
+        self._connect_stop.clear()
+        if not self._try_start_transport(1, self.connect_retry_initial_s):
+            self._connector = Thread(target=self._retry_transport, name="hermes-slack-connect", daemon=True)
+            self._connector.start()
+
+    def _try_start_transport(self, attempt: int, next_delay_s: float) -> bool:
+        """True when done (started, or retrying cannot help). Never raises; never blocks the core."""
         try:
             self.transport.start(self._receive_interaction)
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self.stats.connect_failures += 1
-            log.error("Slack transport start failed; core continues without Slack: %s", exc)
+            log.critical("Slack SDK not importable by %s (%s). Install slack-bolt==1.30.0 in the virtualenv that "
+                         "launchd runs; Slack stays OFF, the market core continues.", sys.executable, exc)
+            return True
+        except Exception as exc:  # noqa: BLE001 - any SDK/network error: the core continues, we retry
+            self.stats.connect_failures += 1
+            log.error("Slack transport start failed (attempt %d): %s: %s — market core continues; retry in %.0fs",
+                      attempt, type(exc).__name__, exc, next_delay_s)
+            return False
+        self.slack_connected = True
+        if attempt > 1:
+            log.warning("Slack transport started after %d attempts", attempt)
+        return True
+
+    def _retry_transport(self) -> None:
+        delay, attempt = self.connect_retry_initial_s, 1
+        while not self._connect_stop.wait(delay):
+            attempt += 1
+            nxt = min(delay * 2, self.connect_retry_max_s)
+            if self._try_start_transport(attempt, nxt):
+                return
+            delay = nxt
 
     def close(self, timeout: float = 3.0) -> None:
         if not self._started:
             return
+        self._connect_stop.set()
+        if self._connector is not None:
+            self._connector.join(timeout)
+            self._connector = None
         try:
             self.transport.close()
         except Exception as exc:  # noqa: BLE001
@@ -718,6 +760,7 @@ class SlackApprovalBridge:
         out.update(
             {
                 "enabled": True,
+                "connected": self.slack_connected,
                 "channel_id": self.transport.channel_id,
                 "journal_entries": self.journal.count,
                 "journal_write_errors": self.journal.write_errors,

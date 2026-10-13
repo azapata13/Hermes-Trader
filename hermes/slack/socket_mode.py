@@ -16,6 +16,8 @@ import hashlib
 import json
 import logging
 import os
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -122,11 +124,19 @@ class SlackSocketModeTransport:
     data to Hermès.
     """
 
+    WATCH_INTERVAL_S = 30.0          # Socket Mode connection check period
+    RECONNECT_AFTER_S = 120.0        # force a reconnect if still down after the SDK's own auto-reconnect
+
     def __init__(self, settings: SlackSettings) -> None:
         self.settings = settings
         self.channel_id = settings.channel_id
         self._app = None
         self._handler = None
+        self._watch_stop = threading.Event()
+        self._watch: threading.Thread | None = None
+        self._ignored_channels: set[str] = set()
+        self.mentions_received = 0
+        self.mentions_ignored = 0
         self._on_interaction: InteractionHandler | None = None
         self._on_mention = None
         self._on_thread_message = None
@@ -163,8 +173,54 @@ class SlackSocketModeTransport:
         handler.connect()
         self._app = app
         self._handler = handler
+        try:
+            who = app.client.auth_test()
+            log.info("Slack Socket Mode connected: bot %s (%s), team %s; listening in channel %s",
+                     who.get("user_id"), who.get("user"), who.get("team"), self.channel_id)
+        except Exception as exc:  # noqa: BLE001 - identity log only; the connection itself succeeded
+            log.info("Slack Socket Mode connected; listening in channel %s (identity lookup failed: %s)",
+                     self.channel_id, type(exc).__name__)
+        self._watch_stop.clear()
+        self._watch = threading.Thread(target=self._watchdog, name="hermes-slack-watchdog", daemon=True)
+        self._watch.start()
+
+    def _connected(self) -> bool | None:
+        client = getattr(self._handler, "client", None)
+        try:
+            return bool(client.is_connected()) if client is not None else None
+        except Exception:  # noqa: BLE001 - unknown state is reported as such
+            return None
+
+    def _watchdog(self) -> None:
+        """Log Socket Mode connection transitions; if the SDK's auto-reconnect has not restored the
+        connection after RECONNECT_AFTER_S, reconnect explicitly. Never touches the market core."""
+        down_since: float | None = None
+        last: bool | None = True
+        while not self._watch_stop.wait(self.WATCH_INTERVAL_S):
+            up = self._connected()
+            if up is None:
+                continue
+            if up != last:
+                (log.info if up else log.warning)("Slack Socket Mode %s", "reconnected" if up else "DISCONNECTED")
+                last = up
+            if up:
+                down_since = None
+                continue
+            now = time.monotonic()
+            down_since = down_since or now
+            if now - down_since >= self.RECONNECT_AFTER_S:
+                log.warning("Slack Socket Mode still down after %.0fs; reconnecting", now - down_since)
+                try:
+                    self._handler.client.connect()
+                    down_since = None
+                except Exception as exc:  # noqa: BLE001 - retried at the next watchdog period
+                    log.error("Slack Socket Mode reconnect failed: %s: %s", type(exc).__name__, exc)
 
     def close(self) -> None:
+        self._watch_stop.set()
+        if self._watch is not None:
+            self._watch.join(2)
+            self._watch = None
         handler = self._handler
         self._handler = None
         self._app = None
@@ -244,9 +300,15 @@ class SlackSocketModeTransport:
         channel = str(event.get("channel") or "")
 
         if channel != self.channel_id:
+            self.mentions_ignored += 1
+            if channel not in self._ignored_channels:          # once per channel: visible, never noisy
+                self._ignored_channels.add(channel)
+                log.warning("Slack mention ignored: channel %s is not HERMES_SLACK_CHANNEL_ID %s",
+                            channel or "?", self.channel_id)
             return
 
         if event.get("bot_id"):
+            self.mentions_ignored += 1
             return
 
         text = str(event.get("text") or "").strip()
@@ -263,7 +325,8 @@ class SlackSocketModeTransport:
             ts=ts,
             thread_ts=str(event.get("thread_ts") or ts),
         )
-
+        self.mentions_received += 1
+        log.info("Slack mention received ts=%s user=%s thread=%s", ts, user_id, mention.thread_ts)
         self._on_mention(mention)
 
     def _require_app(self):
