@@ -207,3 +207,27 @@ def test_closed_decision_view_never_overwrites_the_setup_tracking_view():
         assert _action_ids(fake.updates[-1][1]) == []
     finally:
         b.close()
+
+
+def test_screenshot_is_taken_once_and_kept_through_every_later_update(monkeypatch):
+    """The TWS screenshot is a thread reply on the proposal message: later updates (holds, closing,
+    coalesced bursts) edit the message itself and can never remove it, re-take it or attach it elsewhere."""
+    monkeypatch.setenv("HERMES_SCREENSHOT_ENABLED", "1")
+    lv, rec = started()
+    b, fake = _bridge(lv, hold_display_delay_s=0.0)
+    submitted = []
+    b.enrichment.submit = lambda p, ref: submitted.append((p.proposal_id, ref))
+    try:
+        initial, held, cleared = _views(lv, rec)
+        _post(lv, b, fake, initial)
+        ref = fake.posts[0][0]
+        _flap(lv, b, held, cleared, 3)
+        lv.tick_until(630)
+        closed = current_approval_payload(lv.h.engine, lv.lc.get(rec.setup_id), now_wall_ns=lv.sc.wall)
+        b.publish_decision(_record(JournalKind.CANDIDATE_EXPIRED, closed, lv), closed)
+        b._outbox.join()
+        assert submitted == [(initial.proposal_id, ref)]               # once, on the right message
+        assert len(fake.posts) == 1 and fake.updates and all(u[0] == ref for u in fake.updates)
+        assert fake.uploads == []                                       # updates never upload / replace files
+    finally:
+        b.close()
