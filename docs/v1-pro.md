@@ -225,6 +225,94 @@ engine facts → build_context() (hermes-llm-context/1) → validate_context() �
 - An accepted human decision stays visible on these updates.
 - A re-armed proposal shows one line naming the earlier setup whose entry expired.
 
+## Outcome of every ACTIONABLE setup — SHADOW vs REAL
+
+`hermes/analytics/outcome.py` keeps two structurally separate worlds:
+
+| | SHADOW | REAL |
+|---|---|---|
+| What | post-setup measurement from eligible prints, hypothetical fill at the proposed entry | an executed trade with actual fills |
+| Source | the setup tracker (`setups.jsonl`, `"execution": "SHADOW"`) | `RealTrade` → `~/hermes-data/trades/real_trades.jsonl` |
+| V1 | every setup, taken (ENTER intent) or not | **never written**: there is no execution layer |
+| Label | `SHADOW ONLY — NOT REAL P&L` | `REAL TRADE` (points, P&L, duration, exit reason, MFE/MAE) |
+
+**Shadow outcome rule.**
+
+- Stop touched first → −risk.
+- Otherwise, the signed result at the 15 min horizon.
+- Open or incomplete → no outcome (excluded from statistics).
+- `+10 / +20 / +30 reached` means MFE ≥ target. Excursions freeze at the first stop touch, so a
+  target counts only if it was reached before the stop.
+
+**Slack.** The end-of-tracking update shows a SHADOW RESULT block:
+
+```text
+⚪ SETUP NOT TAKEN — window expired without decision
+SHORT MNQZ6 30680 · SL 30690
+SHADOW RESULT
+MFE +24 pts · MAE -4 pts
++10: YES · +20: YES · +30: NO
+Outcome: +18 pts (complete)
+SHADOW ONLY — NOT REAL P&L
+```
+
+An ENTER in V1 shows `🟡 ENTER INTENT RECORDED — no order sent`: still SHADOW.
+
+**`tools/setup_report.py`** adds a PERFORMANCE section in three separate parts.
+
+- **Decision-time:**
+  - actionable setups, by disposition;
+  - ENTER intents vs not taken.
+- **Post-setup shadow outcome:**
+  - wins, losses, average outcome, MFE, MAE and duration;
+  - +10 / +20 / +30 hit rates;
+  - missed profitable setups, missed +20 pt.
+- **REAL trades:** "none executed" in V1.
+
+Nothing in this module is imported by the decision layer (tested).
+
+## Conversational Slack (Luna / Sol)
+
+- **Where Hermès answers.**
+  - Every @mention.
+  - Plain replies inside a Hermès thread (a proposal, or a conversation it already answered), only
+    from allowlisted users.
+  - Slack also delivers a mention as a plain message; both share the same `ts`, so there is one
+    answer, not two.
+- **Context.**
+  - The setup of the thread: direction, entry, SL, risk, 5m/1m/30s, VWAP, volume, balance,
+    tape/OFI/sweep, reasons, live status, human decision, shadow tracking so far, previous setup.
+  - The published market context.
+  - A bounded memory of the same thread (4 turns).
+  - An optional TWS screenshot.
+- **`status`** is a command, not the default answer.
+- **Completion is verified.**
+  - A reply stopped by the output budget (`status=incomplete`, `max_output_tokens`) is continued
+    once with `previous_response_id`.
+  - If it is still incomplete, it is published with an explicit notice and journaled `incomplete`,
+    never `completed`.
+  - This fixes the live reply cut at "… il ne faut donc pas surinter". The cause was
+    `max_output_tokens=650`, shared with reasoning tokens, and a status that was never read.
+  - Budget `HERMES_CHAT_MAX_OUTPUT_TOKENS` (default 2000), timeout `HERMES_CHAT_TIMEOUT_S`
+    (default 60 s).
+- **Authority.**
+  - The model has no tool.
+  - Lines that claim an approval, an order or a safety change are removed before publication;
+    negations are kept.
+  - The worker's only effect is a thread reply (tested, including prompt injection).
+
+## Contract change
+
+When the live contract is 10 days or less from expiry (or expired), every proposal carries:
+
+```text
+⚠️ CONTRACT CHANGE REQUIRED · Current: MNQZ6 expires 2026-12-18 (in 8 d) · Next contract: MNQH7 —
+set [instrument] last_trade_date_or_contract_month = "202703" and restart. Hermès is not switching silently.
+```
+
+The warning is display only. On restart, the D2.7 identity check refuses any warm-start history of
+the old conId.
+
 ## Warm start, replay, persistence
 
 | File | Written | Content |
