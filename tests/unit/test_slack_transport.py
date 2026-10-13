@@ -239,3 +239,59 @@ def test_auth_failure_in_app_construction_propagates_to_the_bridge_retry(fake_sd
     with pytest.raises(RuntimeError):
         t.start(lambda i: None)
     assert t._app is None and t._handler is None                 # nothing half-started; a retry starts clean
+
+
+# ---------------------------------------------------------------------------- channel messages without @mention
+
+def test_channel_messages_are_routed_and_hermes_own_messages_never_re_enter(fake_sdk):
+    got: list[SlackMention] = []
+    t = _transport()
+    t.set_channel_message_handler(got.append)
+    t.start(lambda i: None)
+    try:
+        message = fake_sdk.instances[0].listeners[("event", "message")]
+        assert t.bot_user_id == "U0BOT"
+        message({"channel": "C123", "user": "U1", "text": "Qu'est-ce qui doit changer pour un LONG ?", "ts": "1.1"})
+        message({"channel": "C123", "user": "U1", "text": "Et la VWAP ?", "ts": "1.2", "thread_ts": "1.1"})
+        # never a question: Hermès' own posts / replies, other bots, edits & system events, other channels
+        message({"channel": "C123", "user": "U0BOT", "bot_id": "B1", "text": "🧠 Hermès · réponse", "ts": "1.3",
+                 "thread_ts": "1.1"})
+        message({"channel": "C123", "user": "U0BOT", "text": "👀 J'analyse le contexte Hermès...", "ts": "1.4"})
+        message({"channel": "C123", "bot_id": "B2", "subtype": "bot_message", "text": "other bot", "ts": "1.5"})
+        message({"channel": "C123", "user": "U1", "subtype": "message_changed", "text": "edit", "ts": "1.6"})
+        message({"channel": "C123", "user": "U1", "subtype": "channel_join", "text": "joined", "ts": "1.7"})
+        message({"channel": "C999", "user": "U1", "text": "wrong channel", "ts": "1.8"})
+        message({"channel": "C123", "user": "U1", "text": "   ", "ts": "1.9"})
+        assert [(m.ts, m.thread_ts) for m in got] == [("1.1", "1.1"), ("1.2", "1.1")]
+        assert got[0].text == "Qu'est-ce qui doit changer pour un LONG ?" and got[0].channel_id == "C123"
+    finally:
+        t.close()
+
+
+def test_bridge_wires_channel_messages_to_the_operator_only_conversation_and_never_to_approvals(tmp_path):
+    from hermes.slack.approvers import ApproverPolicy
+    from hermes.slack.chat import LlmResult
+
+    class ChannelTransport(FakeSlackTransport):
+        def set_channel_message_handler(self, handler):
+            self.on_channel_message = handler
+
+    t = ChannelTransport()
+    b = SlackApprovalBridge(SimpleNamespace(driver=None), None, DecisionConfig(), t, ApprovalJournal(),
+                            approvers=ApproverPolicy(frozenset({"U0AAAA1B2CD"})))
+    calls = []
+    b.chat.responder = lambda **kw: calls.append(kw) or LlmResult("Il faut un régime 5m LONG.")
+    b.chat.screenshot_fn = lambda p: (_ for _ in ()).throw(RuntimeError("no TWS window"))
+    b.chat._journal = tmp_path / "chat.jsonl"
+    b.start()
+    try:
+        assert t.on_channel_message == b.chat.submit_channel_message
+        t.on_channel_message(SlackMention("C123", "U0ZZZZ9Y8XW", "Qu'est-ce qui doit changer ?", "2.1", "2.1"))
+        t.on_channel_message(SlackMention("C123", "U0AAAA1B2CD", "Qu'est-ce qui doit changer pour un LONG ?",
+                                          "2.2", "2.2"))
+        b.chat._queue.join()
+        assert len(calls) == 1 and [r[1] for r in t.replies if r[2].startswith("🧠")] == ["2.2"]
+        assert len(b.journal.entries) == 0 and b.stats.interactions_received == 0   # conversation ≠ approval
+        assert t.posts == [] and t.updates == []
+    finally:
+        b.close()

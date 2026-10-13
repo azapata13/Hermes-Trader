@@ -43,7 +43,7 @@ from hermes.decision.response import (
 )
 from hermes.decision.runtime import JournalKind, JournalRecord
 from hermes.market.events import ContractResolvedEvent
-from hermes.slack.approvers import ApproverPolicy
+from hermes.slack.approvers import ApproverPolicy, ApproverStatus
 from hermes.slack.chat import ConversationalWorker
 from hermes.slack.enrichment import VisualEnrichmentWorker
 from hermes.slack.journal import ApprovalAuditEntry, ApprovalJournal
@@ -228,13 +228,14 @@ class SlackApprovalBridge:
             market_context_provider,
             status_provider=status_provider,
             setup_context_provider=self.setup_context,
-            thread_user_allowed=lambda user_id: self.approvers.check(user_id).may_act,
+            # conversation without @mention: the configured operator only (allowlist present and matching)
+            thread_user_allowed=lambda user_id: self.approvers.check(user_id) is ApproverStatus.AUTHORIZED,
         )
 
         if hasattr(transport, "set_mention_handler"):
             transport.set_mention_handler(self.chat.submit)
-        if hasattr(transport, "set_thread_message_handler"):
-            transport.set_thread_message_handler(self.chat.submit_thread_message)
+        if hasattr(transport, "set_channel_message_handler"):
+            transport.set_channel_message_handler(self.chat.submit_channel_message)
         self.max_interactions_per_event = max_interactions_per_event
 
         self.stats = SlackBridgeStats()

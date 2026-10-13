@@ -139,7 +139,8 @@ class SlackSocketModeTransport:
         self.mentions_ignored = 0
         self._on_interaction: InteractionHandler | None = None
         self._on_mention = None
-        self._on_thread_message = None
+        self._on_channel_message = None
+        self.bot_user_id: str | None = None          # from auth.test: our own messages never re-enter
 
     def start(self, on_interaction: InteractionHandler) -> None:
         from slack_bolt import App
@@ -164,10 +165,9 @@ class SlackSocketModeTransport:
 
         @app.event("message")
         def _message(event):
-            # Plain replies inside a thread (no @mention). The worker answers only in threads Hermès owns,
-            # for allowed users; a message that also mentions the bot arrives as app_mention too and is
-            # de-duplicated by its ts (one answer).
-            self._handle_thread_message(event)
+            # Plain messages in the configured channel (top-level or in a thread), no @mention needed.
+            # The worker answers the authorized operator only; Hermès' own messages never re-enter.
+            self._handle_channel_message(event)
 
         handler = SocketModeHandler(app, self.settings.app_token)
         handler.connect()
@@ -175,6 +175,7 @@ class SlackSocketModeTransport:
         self._handler = handler
         try:
             who = app.client.auth_test()
+            self.bot_user_id = str(who.get("user_id") or "") or None
             log.info("Slack Socket Mode connected: bot %s (%s), team %s; listening in channel %s",
                      who.get("user_id"), who.get("user"), who.get("team"), self.channel_id)
         except Exception as exc:  # noqa: BLE001 - identity log only; the connection itself succeeded
@@ -278,20 +279,21 @@ class SlackSocketModeTransport:
             text=text,
         )
 
-    def set_thread_message_handler(self, handler) -> None:
-        self._on_thread_message = handler
+    def set_channel_message_handler(self, handler) -> None:
+        self._on_channel_message = handler
 
-    def _handle_thread_message(self, event: object) -> None:
-        if self._on_thread_message is None or not isinstance(event, dict):
+    def _handle_channel_message(self, event: object) -> None:
+        if self._on_channel_message is None or not isinstance(event, dict):
             return
+        # bot posts (ours included), edits/deletes/joins (any subtype) and other channels: never a question
         if event.get("bot_id") or event.get("subtype") or str(event.get("channel") or "") != self.channel_id:
             return
-        ts, thread_ts = str(event.get("ts") or ""), str(event.get("thread_ts") or "")
+        ts = str(event.get("ts") or "")
         text, user_id = str(event.get("text") or "").strip(), str(event.get("user") or "")
-        if not (ts and thread_ts and text and user_id) or thread_ts == ts:
+        if not (ts and text and user_id) or (self.bot_user_id and user_id == self.bot_user_id):
             return
-        self._on_thread_message(SlackMention(channel_id=self.channel_id, user_id=user_id, text=text, ts=ts,
-                                             thread_ts=thread_ts))
+        self._on_channel_message(SlackMention(channel_id=self.channel_id, user_id=user_id, text=text, ts=ts,
+                                              thread_ts=str(event.get("thread_ts") or ts)))
 
     def _handle_mention(self, event: object) -> None:
         if self._on_mention is None or not isinstance(event, dict):

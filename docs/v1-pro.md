@@ -275,10 +275,13 @@ Nothing in this module is imported by the decision layer (tested).
 
 - **Where Hermès answers.**
   - Every @mention.
-  - Plain replies inside a Hermès thread (a proposal, or a conversation it already answered), only
-    from allowlisted users.
-  - Slack also delivers a mention as a plain message; both share the same `ts`, so there is one
-    answer, not two.
+  - Every plain message of the authorized operator (`HERMES_SLACK_APPROVER_IDS`) in
+    `HERMES_SLACK_CHANNEL_ID`, no @mention needed. A top-level message is answered in its own thread;
+    follow-ups in that thread (or in a proposal thread) keep the context.
+  - Never: other users without @mention, messages that mention someone else, bot posts (Hermès'
+    own included), edits/joins/system events, other channels.
+  - A message that also mentions the bot arrives twice (`app_mention` and `message`); both share the
+    same `ts`, so there is one answer.
 - **Context.**
   - The setup of the thread: direction, entry, SL, risk, 5m/1m/30s, VWAP, volume, balance,
     tape/OFI/sweep, reasons, live status, human decision, shadow tracking so far, previous setup.

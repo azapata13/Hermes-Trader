@@ -54,7 +54,7 @@ def _worker(tmp_path, llm, *, setup=None, allowed=None, screenshot=None, status=
 
 def _ask(w, text, ts="1760000001.000200", thread_ts=None, user="U1", plain=False):
     m = SlackMention(CH, user, text, ts, thread_ts or ts)
-    (w.submit_thread_message if plain else w.submit)(m)
+    (w.submit_channel_message if plain else w.submit)(m)
     w._queue.join()
 
 
@@ -335,3 +335,62 @@ def test_bridge_setup_context_for_a_proposal_thread():
 def test_continuation_join(head, tail, joined):
     from hermes.slack.chat import _join_continuation
     assert _join_continuation(head, tail) == joined
+
+
+# ---------------------------------------------------------------------------- no @mention needed in the channel
+
+def test_plain_top_level_message_from_the_operator_is_answered_in_its_own_thread(tmp_path):
+    llm = ScriptedLLM(LlmResult("Il faudrait un régime 5m haussier, un setup 1m LONG et un trigger 30s."),
+                      LlmResult("Oui : la VWAP RTH reprise serait la première condition."))
+    w, fake = _worker(tmp_path, llm, allowed=lambda u: u == "U1")
+    try:
+        _ask(w, "Qu'est-ce qui doit changer pour que tu proposes un LONG ?", ts="7.1", plain=True)
+        assert len(llm.calls) == 1 and "Qu'est-ce qui doit changer pour que tu proposes un LONG ?" in \
+            llm.calls[0]["content"][0]["text"]
+        assert fake.replies[-1][0] == CH and fake.replies[-1][1] == "7.1"     # answered in the message's thread
+        # follow-up inside that thread, still without @mention: same conversation, memory kept
+        _ask(w, "Et la VWAP ?", ts="7.2", thread_ts="7.1", plain=True)
+        assert len(llm.calls) == 2 and fake.replies[-1][1] == "7.1"
+        assert "Hermès: Il faudrait un régime 5m haussier" in llm.calls[1]["content"][0]["text"]
+    finally:
+        w.close()
+
+
+def test_plain_messages_need_the_authorized_operator_and_fail_closed_without_allowlist(tmp_path):
+    llm = ScriptedLLM(LlmResult("never"))
+    w, fake = _worker(tmp_path, llm, allowed=lambda u: u == "U1")
+    try:
+        _ask(w, "Qu'est-ce qui doit changer pour un LONG ?", ts="8.1", user="U2", plain=True)
+        assert llm.calls == [] and fake.replies == []
+    finally:
+        w.close()
+    w, fake = _worker(tmp_path, ScriptedLLM(LlmResult("never")), allowed=None)    # no operator check wired
+    try:
+        _ask(w, "Qu'est-ce qui doit changer pour un LONG ?", ts="8.2", plain=True)
+        assert fake.replies == [] and w.ignored_threads == 1
+    finally:
+        w.close()
+
+
+def test_plain_message_addressed_to_someone_or_also_mentioning_the_bot_is_answered_at_most_once(tmp_path):
+    llm = ScriptedLLM(LlmResult("une seule réponse"))
+    w, fake = _worker(tmp_path, llm, allowed=lambda u: u == "U1")
+    try:
+        _ask(w, "<@U0COLLEGUE> tu as vu le DOM ?", ts="9.1", plain=True)       # addressed to a human
+        assert llm.calls == []
+        # Slack delivers a bot mention twice: app_mention (submit) and message (channel): one answer
+        _ask(w, "<@U0BOT> status du setup ?", ts="9.2")
+        _ask(w, "<@U0BOT> status du setup ?", ts="9.2", plain=True)
+        assert len(llm.calls) == 1 and len(_answers(fake)) == 1
+    finally:
+        w.close()
+
+
+def test_plain_status_still_works_as_a_command(tmp_path):
+    llm = ScriptedLLM()
+    w, fake = _worker(tmp_path, llm, allowed=lambda u: u == "U1", status=lambda: "🟢 Hermès STATUS · Execution: DISABLED")
+    try:
+        _ask(w, "status", ts="10.1", plain=True)
+        assert fake.replies == [(CH, "10.1", "🟢 Hermès STATUS · Execution: DISABLED")] and llm.calls == []
+    finally:
+        w.close()

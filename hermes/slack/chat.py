@@ -5,6 +5,10 @@ approval workflow or the broker: its only outward effect is ``transport.reply_te
 
 Context given to the model, in priority order:
 
+Where: every @mention, and every plain message of the authorized operator in the configured channel
+(no @mention needed). A top-level message is answered in its own thread; follow-ups in that thread keep
+the conversation context.
+
 1. the SETUP of the thread when the question is asked in the thread of a Hermès proposal (direction,
    entry, stop, 5m/1m/30s, VWAP, tape/OFI/sweep, reasons, live status, shadow tracking so far);
 2. the current published market context (freshness, BBO, DOM, tape, bars, VWAP, health);
@@ -98,6 +102,9 @@ def openai_responder(*, model: str, content: list, max_output_tokens: int,
     return LlmResult(text=(getattr(r, "output_text", "") or ""), status=str(getattr(r, "status", "") or "completed"),
                      reason=getattr(details, "reason", None) if details is not None else None,
                      response_id=getattr(r, "id", None))
+
+
+_MENTION = re.compile(r"<@[A-Z0-9]+>")
 
 
 def _command_text(text: str) -> str:
@@ -278,13 +285,18 @@ class ConversationalWorker:
         except Exception:  # noqa: BLE001 - context lookup is best effort
             return False
 
-    def submit_thread_message(self, mention: SlackMention) -> None:
-        """A plain (no @mention) reply inside a Hermès thread: answered only in a thread Hermès owns
-        (a proposal or a conversation it already answered) and only for an allowed user."""
-        if mention.thread_ts == mention.ts or not self.known_thread(mention.channel_id, mention.thread_ts):
-            self.ignored_threads += 1
-            return
-        if self.thread_user_allowed is not None and not self.thread_user_allowed(mention.user_id):
+    def submit_channel_message(self, mention: SlackMention) -> None:
+        """A plain message (no @mention) in the configured channel, top-level or inside a thread.
+
+        Answered only for the authorized operator (fail closed when no allowlist check is wired).
+        A top-level message starts a conversation: the answer goes into its thread. A thread reply is
+        answered only in a thread Hermès owns (a proposal, or a conversation it already answered).
+        A message that mentions anyone is skipped here: a bot mention arrives as ``app_mention`` (and is
+        de-duplicated by its ts), a mention of a human is addressed to that human."""
+        allowed = self.thread_user_allowed is not None and self.thread_user_allowed(mention.user_id)
+        threaded = mention.thread_ts != mention.ts
+        if (not allowed or _MENTION.search(mention.text)
+                or (threaded and not self.known_thread(mention.channel_id, mention.thread_ts))):
             self.ignored_threads += 1
             return
         self.submit(mention)
