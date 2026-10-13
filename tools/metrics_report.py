@@ -22,12 +22,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.ibkr import raw_events as R  # noqa: E402
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market.engine import MarketEngine  # noqa: E402
-from hermes.market.orderbook import BookState  # noqa: E402
-from hermes.replay.runner import resolve_config  # noqa: E402
-from hermes.replay.source import RecordingSource, ReplayIncompatible  # noqa: E402
+from hermes.ibkr import raw_events as R
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market.engine import MarketEngine
+from hermes.market.orderbook import BookState
+from hermes.replay.runner import resolve_config
+from hermes.replay.source import RecordingSource, ReplayIncompatible
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 
@@ -98,7 +98,7 @@ def replay_latest_usable(session: Path, config_choice: str) -> tuple[Observation
         try:
             for ev in norm.normalize(raw):
                 eng.on_event(ev)
-        except Exception as exc:  # mirror live/replay fail-safe
+        except Exception as exc:  # noqa: BLE001 - mirror live/replay fail-safe
             eng.internal_error(f"{type(raw).__name__} seq={raw.seq}: {exc!r}", raw.recv_mono_ns)
 
     final_cap = _capture(eng, eng.last_seq, "final")
@@ -163,7 +163,7 @@ def render(obs: Observation | None, eng: MarketEngine, info: Any, notes: list[st
     if grid is not None and best_bid is not None and best_ask is not None:
         try:
             spread_ticks = grid.ticks_between(best_bid, best_ask)
-        except Exception:
+        except Exception:  # noqa: BLE001 - report tool: unpriceable spread shown as unknown
             spread_ticks = None
 
     lines += [

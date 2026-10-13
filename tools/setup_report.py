@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.analytics.stats import OUTCOME_DEFINITION, excursion_quality, missed_report  # noqa: E402
-from hermes.analytics.store import DEFAULT_STORE, load_rows  # noqa: E402
+from hermes.analytics.stats import OUTCOME_DEFINITION, excursion_quality, missed_report
+from hermes.analytics.store import DEFAULT_STORE, load_rows
 
 
 def _rows(path: Path) -> tuple[list[dict], str]:

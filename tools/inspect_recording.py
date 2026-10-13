@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.storage.reader import SessionReport, list_parts, verify_session  # noqa: E402
+from hermes.storage.reader import SessionReport, list_parts, verify_session
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 

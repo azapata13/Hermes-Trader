@@ -8,11 +8,10 @@ import pytest
 
 from hermes.decision.approval import approval_payload, current_approval_payload
 from hermes.decision.lifecycle import CandidateStatus
-from hermes.decision.response import (
-    HumanAction, HumanApprovalResponse, execution_prerequisites, response_matches_view)
+from hermes.decision.response import HumanAction, HumanApprovalResponse, execution_prerequisites, response_matches_view
 from hermes.decision.safety import approval_check
 from hermes.replay.fingerprint import state_hash
-from tests.unit.test_candidate import S, T0
+from tests.unit.test_candidate import T0, S
 from tests.unit.test_lifecycle import started
 
 NOW = (T0 + 605) * S

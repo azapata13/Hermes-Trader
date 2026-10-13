@@ -8,12 +8,19 @@ import json
 import pytest
 
 from hermes.decision.approval import (
-    ApprovalPayload, SAFETY_NOT_EVALUATED, approval_payload, current_approval_payload, payload_to_dict,
-    render_approval_text, verify_approval_view_id, verify_proposal_id)
+    SAFETY_NOT_EVALUATED,
+    ApprovalPayload,
+    approval_payload,
+    current_approval_payload,
+    payload_to_dict,
+    render_approval_text,
+    verify_approval_view_id,
+    verify_proposal_id,
+)
 from hermes.decision.candidate import Direction
 from hermes.decision.lifecycle import CandidateStatus
 from hermes.decision.reasons import SEVERITY_RANK, SOURCES, Reason, Severity, is_code, ordered
-from tests.unit.test_candidate import PRE_RTH, S, T0, trend
+from tests.unit.test_candidate import PRE_RTH, T0, S, trend
 from tests.unit.test_lifecycle import Live, started
 
 NOW = (T0 + 605) * S

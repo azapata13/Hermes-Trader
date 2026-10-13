@@ -39,9 +39,10 @@ def test_a_leftover_file_without_a_live_holder_never_blocks(tmp_path):
 
 
 def test_lock_held_by_another_process_is_released_when_that_process_dies(tmp_path):
-    code = ("import sys, time; sys.path.insert(0, %r); from hermes.core.instance_lock import InstanceLock; "
-            "InstanceLock(%r, '127.0.0.1', 7496, 110).acquire(); print('held', flush=True); time.sleep(60)"
-            % (os.getcwd(), str(tmp_path)))
+    code = (f"import sys, time; sys.path.insert(0, {os.getcwd()!r}); "
+            "from hermes.core.instance_lock import InstanceLock; "
+            f"InstanceLock({str(tmp_path)!r}, '127.0.0.1', 7496, 110).acquire(); "
+            "print('held', flush=True); time.sleep(60)")
     p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
     try:
         assert p.stdout.readline().strip() == "held"

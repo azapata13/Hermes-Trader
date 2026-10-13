@@ -11,7 +11,7 @@ from hermes.market.engine import ALERT_CONFLICT_EXHAUSTED, ALERT_CONTRACT_FAILED
 from hermes.market.events import ConnectionState, Stream, StreamStatus
 from hermes.market.health import ConflictPhase
 from hermes.market.orderbook import BookState
-from tests.support import BBO, BASE, DEPTH, L1, TICK, TRADES, Harness, RawScript
+from tests.support import BASE, BBO, DEPTH, L1, TICK, TRADES, Harness, RawScript
 
 
 def ready() -> tuple[Harness, RawScript]:
@@ -68,7 +68,7 @@ def test_late_depth_callbacks_after_resync_are_ignored():
     step(h, s, s.request, "reqMktDepth", 20_001)
     assert inst(h).book.state is BookState.BUILDING and inst(h).book.bids == ()
     # late callbacks of the OLD generation arrive after the new subscription started
-    for i in range(5):
+    for _ in range(5):
         step(h, s, s.depth, DEPTH, 0, 0, 1, BASE + 10, 999)
     step(h, s, s.error, DEPTH, 317, "Market depth data has been RESET")
     assert inst(h).book.bids == () and inst(h).book.epoch == before.epoch + 1

@@ -14,11 +14,11 @@ import threading
 import time
 from decimal import Decimal
 
-from hermes.ibkr.readonly import ReadOnlyClient
-from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
 from ibapi.ticktype import TickTypeEnum
+from ibapi.wrapper import EWrapper
 
+from hermes.ibkr.readonly import ReadOnlyClient
 
 HOST = "127.0.0.1"
 PORT = 7496

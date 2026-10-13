@@ -21,9 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.analytics.gaps import PathObserver, analyze_windows, eval_points, window_lines  # noqa: E402
-from hermes.decision.runtime import JournalKind  # noqa: E402
-from hermes.replay.runner import ReplayOptions, replay_session  # noqa: E402
+from hermes.analytics.gaps import PathObserver, analyze_windows, eval_points, window_lines
+from hermes.decision.runtime import JournalKind
+from hermes.replay.runner import ReplayOptions, replay_session
 
 
 def _t(ns: int) -> str:

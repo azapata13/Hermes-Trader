@@ -22,13 +22,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.ibkr import raw_events as R  # noqa: E402
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market.absorption import derive_absorption_context  # noqa: E402
-from hermes.market.engine import MarketEngine  # noqa: E402
-from hermes.market.orderbook import BookState  # noqa: E402
-from hermes.replay.runner import resolve_config  # noqa: E402
-from hermes.replay.source import RecordingSource, ReplayIncompatible  # noqa: E402
+from hermes.ibkr import raw_events as R
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market.absorption import derive_absorption_context
+from hermes.market.engine import MarketEngine
+from hermes.market.orderbook import BookState
+from hermes.replay.runner import resolve_config
+from hermes.replay.source import RecordingSource, ReplayIncompatible
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 
@@ -99,7 +99,7 @@ def replay_latest_usable(session: Path, config_choice: str):
         try:
             for ev in norm.normalize(raw):
                 eng.on_event(ev)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - mirror live/replay fail-safe
             eng.internal_error(f"{type(raw).__name__} seq={raw.seq}: {exc!r}", raw.recv_mono_ns)
 
     final_cap = _capture(eng, eng.last_seq, "final")

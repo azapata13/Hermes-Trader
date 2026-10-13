@@ -13,7 +13,7 @@ import pytest
 
 from hermes.config import RecorderConfig
 from hermes.ibkr import raw_events as R
-from hermes.storage.codec import RAW_TYPE_CODES, SCHEMA_VERSION, CodecError, Decoder, Encoder, iter_frames, MAGIC
+from hermes.storage.codec import MAGIC, RAW_TYPE_CODES, SCHEMA_VERSION, CodecError, Decoder, Encoder, iter_frames
 from hermes.storage.reader import iter_raw_events, list_parts, verify_session
 from hermes.storage.recorder import Recorder
 from tests.support import RawScript

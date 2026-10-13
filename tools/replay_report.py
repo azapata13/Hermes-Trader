@@ -25,13 +25,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.replay.checkpoints import (  # noqa: E402
+from hermes.replay.checkpoints import (
     CheckpointPolicy,
     compare_checkpoints,
     load_checkpoints,
 )
-from hermes.replay.runner import ReplayMode, ReplayOptions, replay_session  # noqa: E402
-from hermes.replay.source import ReplayIncompatible  # noqa: E402
+from hermes.replay.runner import ReplayMode, ReplayOptions, replay_session
+from hermes.replay.source import ReplayIncompatible
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 

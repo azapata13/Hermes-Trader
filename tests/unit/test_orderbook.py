@@ -212,7 +212,7 @@ def test_snapshot_is_immutable_copy():
     book.apply(B, UPD, 0, 100, 99, t)
     assert snap.bids[0] == (100, 10)
     assert snap.is_valid and snap.epoch == 0 and snap.issues == frozenset()
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):      # frozen snapshot
         snap.state = BookState.STALE  # type: ignore[misc]
 
 

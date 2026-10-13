@@ -15,10 +15,10 @@ import time
 from datetime import datetime
 from decimal import Decimal
 
-from hermes.ibkr.readonly import ReadOnlyClient
-from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
+from ibapi.wrapper import EWrapper
 
+from hermes.ibkr.readonly import ReadOnlyClient
 
 HOST = "127.0.0.1"
 PORT = 7496
@@ -141,7 +141,7 @@ class HermesOrderFlow(EWrapper):
             f"\n⚡ TRADE #{self.trade_count:<5} "
             f"{ts} | "
             f"{price:>10.2f} | "
-            f"{str(size):>5} contracts | "
+            f"{size!s:>5} contracts | "
             f"{exchange}"
         )
 
@@ -237,7 +237,7 @@ class HermesOrderFlow(EWrapper):
                 if len(book) > DEPTH_ROWS:
                     del book[DEPTH_ROWS:]
 
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - legacy Phase B probe: report and continue
                 print(f"\n⚠️ Book update error: {exc}")
 
     # ============================================================

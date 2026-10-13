@@ -87,7 +87,7 @@ def test_missing_and_invalid_file(tmp_path):
 
 def test_config_is_frozen():
     cfg = load_config()
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):      # dataclasses.FrozenInstanceError is an AttributeError
         cfg.book.depth_rows = 3  # type: ignore[misc]
 
 

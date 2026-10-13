@@ -24,12 +24,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market import bars as bars_mod  # noqa: E402
-from hermes.market.bars import BarFlag  # noqa: E402
-from hermes.market.engine import MarketEngine  # noqa: E402
-from hermes.market.events import ClockTickEvent, TradeEvent  # noqa: E402
+from hermes.config import DEFAULT_CONFIG_PATH, load_config
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market import bars as bars_mod
+from hermes.market.bars import BarFlag
+from hermes.market.engine import MarketEngine
+from hermes.market.events import ClockTickEvent, TradeEvent
 
 _ns = time.perf_counter_ns
 
@@ -177,8 +177,8 @@ def report(raws, cfg, grace_ms: int, tf: int, last: int, perf: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from tools.inspect_recording import DEFAULT_ROOT, resolve_session
     from hermes.storage.reader import iter_raw_events, verify_session
+    from tools.inspect_recording import DEFAULT_ROOT, resolve_session
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", default=str(DEFAULT_ROOT))
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))

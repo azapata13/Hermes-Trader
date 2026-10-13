@@ -32,11 +32,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market import engine as engine_mod  # noqa: E402
-from hermes.market import events as M  # noqa: E402
-from hermes.replay.runner import resolve_config  # noqa: E402
-from hermes.replay.source import RecordingSource, ReplayIncompatible  # noqa: E402
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market import engine as engine_mod
+from hermes.market import events as M
+from hermes.replay.runner import resolve_config
+from hermes.replay.source import RecordingSource, ReplayIncompatible
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 
@@ -181,7 +181,7 @@ def run_once(raws: list[Any], cfg, metrics_on: bool, collect_latency: bool = Fal
                     lat[kind].append(time.perf_counter_ns() - a)
                 else:
                     eng.on_event(ev)
-        except Exception as exc:  # mirror live/replay fail-safe
+        except Exception as exc:  # noqa: BLE001 - mirror live/replay fail-safe
             eng.internal_error(f"{type(raw).__name__} seq={raw.seq}: {exc!r}", raw.recv_mono_ns)
 
         if sample_memory and metrics_on and (i % 100 == 0 or i == len(raws)):

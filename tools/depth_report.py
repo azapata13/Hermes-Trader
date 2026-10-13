@@ -28,13 +28,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.ibkr import raw_events as R  # noqa: E402
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market import events as M  # noqa: E402
-from hermes.market.engine import MarketEngine  # noqa: E402
-from hermes.market.events import Stream  # noqa: E402
-from hermes.replay.runner import resolve_config  # noqa: E402
-from hermes.replay.source import RecordingSource  # noqa: E402
+from hermes.ibkr import raw_events as R
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market import events as M
+from hermes.market.engine import MarketEngine
+from hermes.market.events import Stream
+from hermes.replay.runner import resolve_config
+from hermes.replay.source import RecordingSource
 
 OPS = {0: "INSERT", 1: "UPDATE", 2: "DELETE"}
 SIDES = {0: "ASK", 1: "BID"}

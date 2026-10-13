@@ -26,13 +26,13 @@ class RawScript:
         self.wall = wall0
         self.events: list[R.RawEvent] = []
 
-    def advance(self, ms: float) -> "RawScript":
+    def advance(self, ms: float) -> RawScript:
         ns = int(ms * MS)
         self.mono += ns
         self.wall += ns
         return self
 
-    def at(self, t_s: float) -> "RawScript":
+    def at(self, t_s: float) -> RawScript:
         """Move wall (and mono) time forward to absolute UTC epoch seconds ``t_s``."""
         ns = round(t_s * 10**9) - self.wall
         assert ns >= 0, "time only moves forward"
@@ -205,12 +205,12 @@ class Harness:
                                    tape_cfg=tape, bars_cfg=bars)
         self.market_events = []
 
-    def feed(self, raws) -> "Harness":
+    def feed(self, raws) -> Harness:
         for raw in raws:
             for ev in self.normalizer.normalize(raw):
                 self.market_events.append(ev)
                 self.engine.on_event(ev)
         return self
 
-    def run(self, script: RawScript, start: int = 0) -> "Harness":
+    def run(self, script: RawScript, start: int = 0) -> Harness:
         return self.feed(script.events[start:])

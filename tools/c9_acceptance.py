@@ -27,9 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
-from hermes.replay.decisions import compare_decisions  # noqa: E402
-from hermes.replay.runner import ReplayOptions, replay_session  # noqa: E402
+from hermes.config import DEFAULT_CONFIG_PATH, load_config
+from hermes.replay.decisions import compare_decisions
+from hermes.replay.runner import ReplayOptions, replay_session
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/hermes-data/recordings"))
 

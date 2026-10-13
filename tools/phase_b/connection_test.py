@@ -13,8 +13,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import threading
 import time
 
-from hermes.ibkr.readonly import ReadOnlyClient
 from ibapi.wrapper import EWrapper
+
+from hermes.ibkr.readonly import ReadOnlyClient
 
 
 class HermesIBKR(EWrapper):

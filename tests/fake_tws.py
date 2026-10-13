@@ -24,9 +24,21 @@ import time
 
 from ibapi.message import IN, OUT
 from ibapi.protobuf import (
-    ContractData_pb2, ContractDataEnd_pb2, ContractDataRequest_pb2, CurrentTime_pb2, ErrorMessage_pb2,
-    MarketDataRequest_pb2, MarketDataType_pb2, MarketDepth_pb2, MarketDepthRequest_pb2, MarketRule_pb2,
-    MarketRuleRequest_pb2, NextValidId_pb2, StartApiRequest_pb2, TickByTickData_pb2, TickByTickRequest_pb2,
+    ContractData_pb2,
+    ContractDataEnd_pb2,
+    ContractDataRequest_pb2,
+    CurrentTime_pb2,
+    ErrorMessage_pb2,
+    MarketDataRequest_pb2,
+    MarketDataType_pb2,
+    MarketDepth_pb2,
+    MarketDepthRequest_pb2,
+    MarketRule_pb2,
+    MarketRuleRequest_pb2,
+    NextValidId_pb2,
+    StartApiRequest_pb2,
+    TickByTickData_pb2,
+    TickByTickRequest_pb2,
     TickPrice_pb2,
 )
 
@@ -66,7 +78,7 @@ class FakeTws:
         while not self._stop:
             try:
                 conn, _ = self.sock.accept()
-            except (socket.timeout, OSError):
+            except (TimeoutError, OSError):
                 continue
             threading.Thread(target=self._handle, args=(conn,), name="fake-tws-conn", daemon=True).start()
 

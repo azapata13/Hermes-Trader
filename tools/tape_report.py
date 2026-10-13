@@ -22,11 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
-from hermes.ibkr.normalizer import Normalizer  # noqa: E402
-from hermes.market.engine import MarketEngine  # noqa: E402
-from hermes.storage.reader import iter_raw_events, verify_session  # noqa: E402
-from tools.inspect_recording import DEFAULT_ROOT, resolve_session  # noqa: E402
+from hermes.config import DEFAULT_CONFIG_PATH, load_config
+from hermes.ibkr.normalizer import Normalizer
+from hermes.market.engine import MarketEngine
+from hermes.storage.reader import iter_raw_events, verify_session
+from tools.inspect_recording import DEFAULT_ROOT, resolve_session
 
 
 def replay(session: Path, cfg, window_ms: int) -> dict:
@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  methods: " + ", ".join(f"{k}={n}" for k, n in sorted(r["methods"].items())))
         ages = r["hist_ages_ns"]
         if ages:
-            pct = lambda q: ages[min(len(ages) - 1, int(q * len(ages)))] / 1e6  # noqa: E731
+            pct = lambda q: ages[min(len(ages) - 1, int(q * len(ages)))] / 1e6  # noqa: E731, B023 - called in this iteration only
             print(f"  historical quote age ms (quote used -> trade arrival): n={len(ages)} "
                   f"p50={pct(0.5):.2f} p90={pct(0.9):.2f} p99={pct(0.99):.2f} max={ages[-1] / 1e6:.2f}")
         if r["unknown_reasons"]:

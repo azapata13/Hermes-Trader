@@ -1,5 +1,5 @@
-from tools import metrics_report
 from tests.support import BASE, DEPTH, TICK, TRADES, RawScript, write_hrec
+from tools import metrics_report
 
 
 def test_metrics_report_finds_latest_valid_pre_shutdown_state(tmp_path, capsys):

@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -36,9 +37,9 @@ class ScriptedClient:
     closed        socket closed by TWS before nextValidId
     refused       socket connect fails"""
 
-    script: list[str] = []
+    script: ClassVar[list[str]] = []
     session = None
-    log: list[tuple[str, float]] = []
+    log: ClassVar[list[tuple[str, float]]] = []
     live = 0
     max_live = 0
     lock = threading.Lock()
