@@ -196,9 +196,27 @@ def history_line(h: HistoryStat | None) -> str | None:
 ROLL_WARN_DAYS = 10           # CME equity-index futures roll ~8 days before expiry (3rd Friday)
 
 
+_QUARTER = {"H": 3, "M": 6, "U": 9, "Z": 12}
+_MONTH_CODE = {3: "H", 6: "M", 9: "U", 12: "Z"}
+
+
+def next_quarterly_contract(local_symbol: str | None, expiry: str | None) -> tuple[str, str] | None:
+    """('MNQH7', '202703') for MNQZ6 expiring 2026-12: the next CME quarterly equity-index contract.
+    None when the symbol is not of the ROOT+month-code+year-digit form."""
+    sym = str(local_symbol or "")
+    digits = "".join(ch for ch in str(expiry or "") if ch.isdigit())
+    if len(sym) < 3 or sym[-2] not in _QUARTER or not sym[-1].isdigit() or len(digits) < 6:
+        return None
+    year, month = int(digits[:4]), _QUARTER[sym[-2]]
+    month, year = (month + 3, year) if month < 12 else (3, year + 1)
+    return f"{sym[:-2]}{_MONTH_CODE[month]}{year % 10}", f"{year:04d}{month:02d}"
+
+
 def contract_roll_warning(local_symbol: str | None, expiry: str | None, now_wall_ns: int | None) -> str | None:
-    """Operator warning when the traded contract is near (or past) its expiry, from the contract
-    IBKR resolved (``expiry`` = lastTradeDateOrContractMonth, YYYYMMDD). Display only: it never
+    """Operator warning when the traded contract is near (or past) its expiry, from the contract IBKR
+    resolved (``expiry`` = lastTradeDateOrContractMonth, YYYYMMDD). Hermès never switches contract by
+    itself: the operator changes ``[instrument] last_trade_date_or_contract_month`` and restarts (the
+    D2.7 identity check then refuses any warm-start history of the old conId). Display only: it never
     changes a candidate, a status or an approval. None when not near expiry or not computable."""
     digits = "".join(ch for ch in str(expiry or "") if ch.isdigit())[:8]
     if len(digits) < 8 or not now_wall_ns:
@@ -211,12 +229,13 @@ def contract_roll_warning(local_symbol: str | None, expiry: str | None, now_wall
     if days > ROLL_WARN_DAYS:
         return None
     sym = local_symbol or "contract"
-    if days < 0:
-        return f"⚠ CONTRACT {sym} EXPIRED {exp:%Y-%m-%d} — switch Hermès and TWS to the next contract before acting"
-    if days == 0:
-        return f"⚠ CONTRACT {sym} EXPIRES TODAY — liquidity is moving to the next contract; check before acting"
-    return (f"⚠ CONTRACT ROLL: {sym} expires {exp:%Y-%m-%d} (in {days} d) — volume moves to the next contract; "
-            "update [instrument] contract month and restart Hermès")
+    nxt = next_quarterly_contract(local_symbol, expiry)
+    when = ("EXPIRED " + f"{exp:%Y-%m-%d}" if days < 0 else "expires TODAY" if days == 0
+            else f"expires {exp:%Y-%m-%d} (in {days} d)")
+    target = (f"Next contract: {nxt[0]} — set [instrument] last_trade_date_or_contract_month = \"{nxt[1]}\" "
+              "and restart" if nxt else "Select the next contract in [instrument] and restart")
+    return (f"⚠️ CONTRACT CHANGE REQUIRED · Current: {sym} {when} · {target}. "
+            "Hermès is not switching silently.")
 
 
 def remaining_s(p: ApprovalPayload) -> int | None:
@@ -256,3 +275,33 @@ def summarize(p: ApprovalPayload, history: HistoryStat | None = None) -> TradeSu
         history=history_line(history),
         footer=footer,
     )
+
+
+def setup_context_text(payload, view, human: str | None, previous=None, previous_view=None) -> str:
+    """Compact, factual context of one proposal for the conversational analyst (pure; no engine)."""
+    from hermes.analytics.outcome import shadow_result
+
+    lines: list[str] = []
+    if payload is not None:
+        s = summarize(payload)
+        lines += [f"PROPOSAL {s.headline} · {s.risk}", f"status at last display: {payload.status}"
+                  f" (approval allowed: {'yes' if payload.approval_allowed_now else 'no'})",
+                  s.timeframes, s.context, s.confirmation]
+        lines += [f"reason: {r}" for r in s.reasons] + list(s.warnings)
+    if human:
+        lines.append(f"human decision: {human} (V1: intent only, no order sent)")
+    if view is not None:
+        o = view.outcome
+        lines.append(f"tracking: phase {view.phase.value}, window {view.window_close_status or 'open'}, "
+                     f"outcome {o.status.value}")
+        r = shadow_result(view.row())
+        lines.append(f"SHADOW so far (post-setup measurement, not a trade, not P&L): MFE {r.mfe_pt:+.2f} pt, "
+                     f"MAE {-r.mae_pt:+.2f} pt, " + ", ".join(f"+{t} {'yes' if h else 'no'}" for t, h in r.hits)
+                     + (f", outcome {r.outcome_pt:+.2f} pt" if r.final else ", outcome not final"))
+    if previous is not None:
+        lines.append(f"previous setup: {summarize(previous).headline} · status {previous.status}")
+        if previous_view is not None:
+            pr = shadow_result(previous_view.row())
+            lines.append(f"previous setup SHADOW: MFE {pr.mfe_pt:+.2f} pt, MAE {-pr.mae_pt:+.2f} pt"
+                         + (f", outcome {pr.outcome_pt:+.2f} pt" if pr.final else ", not final"))
+    return "\n".join(x for x in lines if x)

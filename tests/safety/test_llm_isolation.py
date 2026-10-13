@@ -13,7 +13,8 @@ from hermes.slack.pro import InterpretationWorker
 ROOT = Path(__file__).resolve().parents[2]
 LLM_MODULES = [ROOT / "hermes" / "analytics" / "llm_context.py", ROOT / "hermes" / "slack" / "pro.py",
                ROOT / "hermes" / "analytics" / "stats.py", ROOT / "hermes" / "analytics" / "store.py",
-               ROOT / "hermes" / "analytics" / "gaps.py"]
+               ROOT / "hermes" / "analytics" / "gaps.py", ROOT / "hermes" / "analytics" / "outcome.py",
+               ROOT / "hermes" / "slack" / "chat.py"]
 FORBIDDEN = ("ibapi", "hermes.ibkr", "hermes.app", "hermes.storage", "hermes.decision.runtime",
              "hermes.decision.lifecycle", "hermes.decision.safety", "hermes.decision.response", "hermes.config",
              "socket", "subprocess")

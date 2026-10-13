@@ -18,7 +18,7 @@ from hermes.slack.fake import FakeSlackTransport
 from hermes.slack.journal import ApprovalJournal
 from hermes.slack.protocol import ENTER_ACTION_ID
 from hermes.slack.render import render_slack_message
-from hermes.slack.summary import ROLL_WARN_DAYS, contract_roll_warning
+from hermes.slack.summary import ROLL_WARN_DAYS, contract_roll_warning, next_quarterly_contract
 from tests.unit.test_lifecycle import started
 from tests.unit.test_slack_approval import NOW, _action_ids, _record, _wait
 
@@ -36,10 +36,11 @@ def test_no_warning_far_from_expiry_or_without_a_full_date():
 
 def test_roll_window_today_and_expired():
     w = contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 10))
-    assert w and "CONTRACT ROLL" in w and "MNQZ6" in w and "2026-12-18" in w and "in 8 d" in w
+    assert w and "CONTRACT CHANGE REQUIRED" in w and "Current: MNQZ6" in w and "2026-12-18" in w and "in 8 d" in w
+    assert "Next contract: MNQH7" in w and '"202703"' in w and "not switching silently" in w
     assert contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 18 - ROLL_WARN_DAYS))
     assert contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 18 - ROLL_WARN_DAYS - 1)) is None
-    assert "EXPIRES TODAY" in contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 18))
+    assert "expires TODAY" in contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 18))
     assert "EXPIRED" in contract_roll_warning("MNQZ6", "20261218", _ns(2026, 12, 21))
 
 
@@ -47,10 +48,10 @@ def test_warning_is_display_only_and_keeps_the_buttons():
     lv, rec = started()
     p = current_approval_payload(lv.h.engine, rec, now_wall_ns=NOW)
     plain = render_slack_message(p)
-    warned = render_slack_message(p, roll_warning="⚠ CONTRACT ROLL: MNQZ6 expires 2026-12-18 (in 8 d)")
+    warned = render_slack_message(p, roll_warning="⚠️ CONTRACT CHANGE REQUIRED · Current: MNQZ6")
     assert _action_ids(warned) == _action_ids(plain) and ENTER_ACTION_ID in _action_ids(warned)
-    assert "CONTRACT ROLL" in json.dumps(warned.blocks, ensure_ascii=False)
-    assert "CONTRACT ROLL" not in json.dumps(plain.blocks, ensure_ascii=False)
+    assert "CONTRACT CHANGE REQUIRED" in json.dumps(warned.blocks, ensure_ascii=False)
+    assert "CONTRACT CHANGE REQUIRED" not in json.dumps(plain.blocks, ensure_ascii=False)
 
 
 def _contract_event(expiry):
@@ -79,6 +80,14 @@ def test_bridge_warns_when_the_live_contract_is_in_its_roll_window():
     when = datetime.fromtimestamp(NOW / 1e9, tz=UTC).date()
     near = f"{when.year:04d}{when.month:02d}{when.day:02d}"                 # expires on the proposal's day
     text, buttons = _post_with_contract(near)
-    assert "EXPIRES TODAY" in text and ENTER_ACTION_ID in buttons          # attention required, nothing blocked
+    assert "expires TODAY" in text and ENTER_ACTION_ID in buttons          # attention required, nothing blocked
     text, _ = _post_with_contract(f"{when.year + 1:04d}1218")
     assert "CONTRACT" not in text
+
+
+def test_next_quarterly_contract():
+    assert next_quarterly_contract("MNQZ6", "20261218") == ("MNQH7", "202703")
+    assert next_quarterly_contract("MNQH7", "20270319") == ("MNQM7", "202706")
+    assert next_quarterly_contract("MNQU9", "20290921") == ("MNQZ9", "202912")
+    assert next_quarterly_contract("MNQ", "20261218") is None
+    assert next_quarterly_contract("MNQZ6", "") is None

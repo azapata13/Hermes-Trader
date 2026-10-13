@@ -55,7 +55,7 @@ from hermes.slack.protocol import (
     SlackWorkflowState,
 )
 from hermes.slack.render import render_setup_message, render_slack_message
-from hermes.slack.summary import contract_roll_warning
+from hermes.slack.summary import contract_roll_warning, setup_context_text
 
 log = logging.getLogger("hermes.slack.bridge")
 
@@ -219,10 +219,14 @@ class SlackApprovalBridge:
             transport,
             market_context_provider,
             status_provider=status_provider,
+            setup_context_provider=self.setup_context,
+            thread_user_allowed=lambda user_id: self.approvers.check(user_id).may_act,
         )
 
         if hasattr(transport, "set_mention_handler"):
             transport.set_mention_handler(self.chat.submit)
+        if hasattr(transport, "set_thread_message_handler"):
+            transport.set_thread_message_handler(self.chat.submit_thread_message)
         self.max_interactions_per_event = max_interactions_per_event
 
         self.stats = SlackBridgeStats()
@@ -242,6 +246,7 @@ class SlackApprovalBridge:
         self._hold_since: dict[str, float] = {}
         self._hold_shown: set[str] = set()
         self._setup_views: dict[str, OutboundSetup] = {}
+        self._latest_setup: dict[str, object] = {}          # proposal_id -> latest tracking SetupView (immutable)
 
         self._contract: tuple[str, str] | None = None     # (local_symbol, expiry) of the LIVE resolved contract
         self._roll_logged: str | None = None
@@ -330,6 +335,9 @@ class SlackApprovalBridge:
         """V1 Pro: queue a setup-tracking update of the proposal's existing message. Never posts a new
         message, never carries buttons, never performs network I/O on the caller's thread."""
         pid = getattr(view, "proposal_id", None)
+        if pid:
+            with self._display_lock:
+                self._latest_setup[pid] = view                # conversation context (read on the chat thread)
         if event.kind not in SETUP_SLACK_EVENTS or not pid:
             return
         with self._display_lock:
@@ -680,6 +688,22 @@ class SlackApprovalBridge:
             self._displayed[p.proposal_id] = p
         self.stats.updates += 1
         return True
+
+    def setup_context(self, channel_id: str, thread_ts: str) -> str | None:
+        """Facts of the Hermès proposal whose message started this thread (None if it is not one).
+        Read on the chat thread from immutable snapshots only; never touches the engine."""
+        with self._display_lock:
+            pid = next((p for p, ref in self._message_refs.items()
+                        if ref.ts == thread_ts and ref.channel_id == channel_id), None)
+            if pid is None:
+                return None
+            order = list(self._message_refs)
+            payload = self._displayed.get(pid)
+            view = self._latest_setup.get(pid)
+            prev_pid = order[order.index(pid) - 1] if order.index(pid) > 0 else None
+            prev = self._displayed.get(prev_pid) if prev_pid else None
+            prev_view = self._latest_setup.get(prev_pid) if prev_pid else None
+        return setup_context_text(payload, view, self._human_actions.get(pid), prev, prev_view)
 
     def displayed_view(self, proposal_id: str) -> ApprovalPayload | None:
         with self._display_lock:
