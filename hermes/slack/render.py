@@ -72,6 +72,7 @@ def render_slack_message(
     banner: str | None = None,
     history: HistoryStat | None = None,
     note: str | None = None,
+    roll_warning: str | None = None,
 ) -> SlackMessage:
     """Render the exact approval view the human is shown.
 
@@ -89,8 +90,9 @@ def render_slack_message(
     ]
     if s.reasons:
         blocks.append(_section("\n".join(f"{i}) {_esc(r)}" for i, r in enumerate(s.reasons, 1))))
-    if s.warnings:
-        blocks.append(_section("\n".join(_esc(w) for w in s.warnings)))
+    warnings = ((roll_warning,) if roll_warning else ()) + tuple(s.warnings)
+    if warnings:
+        blocks.append(_section("\n".join(_esc(w) for w in warnings)))
     if s.history:
         blocks.append(_section(_esc(s.history)))
     if note:

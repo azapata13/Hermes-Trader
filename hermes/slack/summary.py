@@ -12,6 +12,7 @@ a defined outcome and comparable-set selection. No source exists yet, so nothing
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 
 from hermes.decision.approval import ApprovalPayload, TimeframeSummary
 from hermes.decision.reasons import Severity
@@ -190,6 +191,32 @@ def history_line(h: HistoryStat | None) -> str | None:
         return None
     line = f"History: {round(100 * h.wins / h.samples)}% {h.outcome_label} · {h.samples} similar setups"
     return line + " (shadow)" if h.shadow else line
+
+
+ROLL_WARN_DAYS = 10           # CME equity-index futures roll ~8 days before expiry (3rd Friday)
+
+
+def contract_roll_warning(local_symbol: str | None, expiry: str | None, now_wall_ns: int | None) -> str | None:
+    """Operator warning when the traded contract is near (or past) its expiry, from the contract
+    IBKR resolved (``expiry`` = lastTradeDateOrContractMonth, YYYYMMDD). Display only: it never
+    changes a candidate, a status or an approval. None when not near expiry or not computable."""
+    digits = "".join(ch for ch in str(expiry or "") if ch.isdigit())[:8]
+    if len(digits) < 8 or not now_wall_ns:
+        return None
+    try:
+        exp = date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return None
+    days = (exp - datetime.fromtimestamp(now_wall_ns / 1e9, tz=UTC).date()).days
+    if days > ROLL_WARN_DAYS:
+        return None
+    sym = local_symbol or "contract"
+    if days < 0:
+        return f"⚠ CONTRACT {sym} EXPIRED {exp:%Y-%m-%d} — switch Hermès and TWS to the next contract before acting"
+    if days == 0:
+        return f"⚠ CONTRACT {sym} EXPIRES TODAY — liquidity is moving to the next contract; check before acting"
+    return (f"⚠ CONTRACT ROLL: {sym} expires {exp:%Y-%m-%d} (in {days} d) — volume moves to the next contract; "
+            "update [instrument] contract month and restart Hermès")
 
 
 def remaining_s(p: ApprovalPayload) -> int | None:

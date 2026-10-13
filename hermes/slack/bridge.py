@@ -41,6 +41,7 @@ from hermes.decision.response import (
     response_matches_view,
 )
 from hermes.decision.runtime import JournalKind, JournalRecord
+from hermes.market.events import ContractResolvedEvent
 from hermes.slack.approvers import ApproverPolicy
 from hermes.slack.chat import ConversationalWorker
 from hermes.slack.enrichment import VisualEnrichmentWorker
@@ -54,6 +55,7 @@ from hermes.slack.protocol import (
     SlackWorkflowState,
 )
 from hermes.slack.render import render_setup_message, render_slack_message
+from hermes.slack.summary import contract_roll_warning
 
 log = logging.getLogger("hermes.slack.bridge")
 
@@ -82,6 +84,7 @@ class OutboundView:
     banner: str | None = None
     hold: str = ""                   # "entered" / "cleared" for TEMPORARY_HOLD_* records (display debounce)
     at: float = 0.0                  # monotonic enqueue time
+    roll_warning: str | None = None  # contract near/after expiry (display only)
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +243,9 @@ class SlackApprovalBridge:
         self._hold_shown: set[str] = set()
         self._setup_views: dict[str, OutboundSetup] = {}
 
+        self._contract: tuple[str, str] | None = None     # (local_symbol, expiry) of the LIVE resolved contract
+        self._roll_logged: str | None = None
+
         self._seen_interactions: set[str] = set()
         self._seen_responses: set[tuple[str, str, str, str, str]] = set()
         self._human_closed: set[str] = set()
@@ -308,7 +314,17 @@ class SlackApprovalBridge:
             state, banner = SlackWorkflowState.CLOSED, f"Candidate {record.status or 'closed'} — ENTER disabled."
         else:
             state, banner = _state_for_view(view), None
-        self._enqueue(OutboundView(view, state, banner, hold=hold, at=self._clock()))
+        self._enqueue(OutboundView(view, state, banner, hold=hold, at=self._clock(),
+                                   roll_warning=self._roll_warning(record.wall_ns)))
+
+    def _roll_warning(self, wall_ns: int) -> str | None:
+        if self._contract is None:
+            return None
+        text = contract_roll_warning(self._contract[0], self._contract[1], wall_ns)
+        if text and text != self._roll_logged:
+            self._roll_logged = text
+            log.warning("%s", text)
+        return text
 
     def publish_setup(self, event, view) -> None:
         """V1 Pro: queue a setup-tracking update of the proposal's existing message. Never posts a new
@@ -328,6 +344,9 @@ class SlackApprovalBridge:
 
     def after_event(self, raw, events, now_mono_ns: int) -> None:
         """Drain a bounded number of Slack intents on the single-writer dispatch thread."""
+        for ev in events:
+            if isinstance(ev, ContractResolvedEvent):
+                self._contract = (ev.local_symbol, ev.expiry)        # display-only roll warning source
         for _ in range(self.max_interactions_per_event):
             try:
                 interaction = self._inbox.get_nowait()
@@ -628,7 +647,8 @@ class SlackApprovalBridge:
         fresh = item.state is SlackWorkflowState.ACTIVE
         msg = render_slack_message(p, workflow_state=item.state, banner=item.banner,
                                    history=self._provided(self.history_provider, p) if fresh else None,
-                                   note=self._provided(self.note_provider, p) if fresh else None)
+                                   note=self._provided(self.note_provider, p) if fresh else None,
+                                   roll_warning=item.roll_warning)
         with self._display_lock:
             ref = self._message_refs.get(p.proposal_id)
         if ref is None:
