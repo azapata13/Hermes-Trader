@@ -45,3 +45,37 @@ def test_synthetic_day_report_is_deterministic():
     a1, a2 = analyse_day(b, ctx), analyse_day(*synthetic_day())
     assert a1 == a2 and [s["name"] for s in a1["segments"]] == ["OUVERTURE", "MIDI", "FIN"]
     assert {t["name"] for t in stop_tests(b, 0.25)} >= {"MIDI 11:00", "FIN 14:00"}
+
+
+def test_fast_replay_skipping_depth_gives_identical_bars(tmp_path):
+    import random
+
+    from hermes.config import DEFAULT_CONFIG_PATH, load_config
+    from tests.support import BBO, DEPTH, TRADES, RawScript, write_hrec
+    from tools.day_analysis import load_bars
+    r1 = 1790083800
+    sc = RawScript(wall0=(r1 - 600) * 10**9)
+    sc.bootstrap(trading_hours="20260921:1700-20260922:1600", liquid_hours="20260922:0830-20260922:1500",
+                 time_zone_id="US/Central")
+    sc.seed_book()
+    rng, t, px = random.Random(1), float(r1 - 600), 21000.0
+    while t < r1 + 1800:
+        t += rng.expovariate(4.0)
+        sc.at(t)
+        if rng.random() < 0.3:
+            sc.tick()
+        r = rng.random()
+        if r < 0.6:
+            sc.depth(DEPTH, rng.randint(0, 4), 1, rng.randint(0, 1), px + 0.25 * rng.randint(-4, 4), rng.randint(1, 9))
+        elif r < 0.8:
+            px = round((px + rng.gauss(0, 0.5)) * 4) / 4
+            sc.bbo(BBO, px - 0.25, px)
+        else:
+            sc.trade(TRADES, px if rng.random() < 0.5 else px - 0.25, rng.randint(1, 5))
+    sc.at(t + 400)
+    sc.tick()
+    write_hrec(tmp_path, sc.events)
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    full, _ = load_bars([tmp_path], cfg, with_depth=True)
+    fast, _ = load_bars([tmp_path], cfg, with_depth=False)
+    assert full and full == fast

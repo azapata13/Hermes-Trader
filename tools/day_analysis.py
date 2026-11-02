@@ -73,7 +73,15 @@ class B:
         return self.buy - self.sell
 
 
-def replay_bars(raws, cfg) -> tuple[list[B], dict]:
+# Depth rows are by far the most numerous raw events and only drive the order book, which neither
+# the bars nor the aggressor classification (tick-by-tick BBO, C4) read. Skipping them makes the
+# replay many times faster; --with-depth replays everything (exact live-engine equivalence, slow).
+SKIP_FAST = frozenset({"RawMarketDepth"})
+
+
+def replay_bars(raws, cfg, with_depth: bool = False) -> tuple[list[B], dict]:
+    if not with_depth:
+        raws = (r for r in raws if type(r).__name__ not in SKIP_FAST)
     bcfg = dataclasses.replace(cfg.bars, enabled=True, history_30s=10**7, history_1m=10**7, history_5m=10**7)
     norm = Normalizer()
     eng = MarketEngine(cfg.book, cfg.session, cfg.subscriptions, tape_cfg=cfg.tape, bars_cfg=bcfg)
@@ -441,12 +449,33 @@ def recent_sessions(root: Path, since_epoch: float) -> list[Path]:
     return out
 
 
-def load_bars(dirs: list[Path], cfg) -> tuple[list[B], dict]:
+def iter_events_fast(session_dir: Path, skip: frozenset[str]):
+    """Like reader.iter_raw_events but never BUILDS the skipped event objects (msgpack still unpacks)."""
+    from hermes.storage.codec import KIND_HEADER, KIND_RAW, MAGIC, Decoder, iter_frames
+    from hermes.storage.reader import list_parts
+    for part in list_parts(session_dir):
+        data = part.read_bytes()
+        if not data.startswith(MAGIC):
+            continue
+        dec = Decoder()
+        skip_codes: set[int] = set()
+        for _, rec in iter_frames(data, len(MAGIC)):
+            if rec is None:
+                break
+            if rec[0] == KIND_HEADER:
+                dec.load_header(rec[1])
+                skip_codes = {c for c, (cls, _) in (dec._types or {}).items() if cls.__name__ in skip}
+            elif rec[0] == KIND_RAW and rec[1] not in skip_codes:
+                yield dec.raw(rec)
+
+
+def load_bars(dirs: list[Path], cfg, with_depth: bool = False) -> tuple[list[B], dict]:
     from hermes.storage.reader import iter_raw_events
     lists, ctx = [], {}
     for d in dirs:
         try:
-            bl, c = replay_bars(iter_raw_events(d), cfg)
+            src = iter_raw_events(d) if with_depth else iter_events_fast(d, SKIP_FAST)
+            bl, c = replay_bars(src, cfg, with_depth)
         except Exception as e:  # one damaged session must not kill the daily report
             print(f"{d}: replay impossible ({e!r}), session ignorée", file=sys.stderr)
             continue
@@ -518,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--slip", type=float, default=0.25, help="glissement par sortie, en points")
     ap.add_argument("--out", help="écrire le rapport Markdown ici")
     ap.add_argument("--json", help="écrire les résultats JSON ici")
+    ap.add_argument("--with-depth", action="store_true",
+                    help="rejouer aussi la profondeur du carnet (identique au live, beaucoup plus lent)")
     ap.add_argument("--synthetic", action="store_true")
     args = ap.parse_args(argv)
 
@@ -544,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Aucune session enregistrée récente sous {root}", file=sys.stderr)
             return 2
         print(f"Sessions rejouées : {len(dirs)}", file=sys.stderr)
-        bars, ctx = load_bars(dirs, cfg)
+        bars, ctx = load_bars(dirs, cfg, args.with_depth)
         days = trading_days(bars)
         if want is not None:
             days = [d for d in days if d == want]
