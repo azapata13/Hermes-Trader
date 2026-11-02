@@ -13,8 +13,9 @@ Les sessions sont rangées sous la date UTC de leur **démarrage** : l'outil rej
 cd <repo> && git pull && bash deploy/install_daily_analysis.sh
 ```
 
-Lancement automatique 11:05, 14:05, 16:20 (NY), lun-ven. Rapports : `~/hermes-data/reports/AAAA-MM-JJ.md` (+ `.json`, copie horodatée,
-`agregat-10-jours.md` après la clôture), notification macOS, journal `~/hermes-data/logs/daily_analysis.log`.
+Lancement automatique 11:05, 14:05, 16:20 (NY), lun-ven. Après la clôture : **`~/hermes-data/reports/RAPPORT-AAAA-MM-JJ.md`**
+(le rapport à envoyer, voir `docs/RAPPORT_QUOTIDIEN.md`) + fichiers détaillés, notification macOS, journal
+`~/hermes-data/logs/daily_analysis.log`.
 
 À la main : `tools/run_daily_analysis.sh 2026-11-02` ou `python tools/day_analysis.py --days 10`.
 

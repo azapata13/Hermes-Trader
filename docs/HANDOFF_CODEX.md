@@ -15,10 +15,12 @@ journée, et tester le déplacement du stop.
 |---|---|
 | `tools/day_analysis.py` | Niveaux (veille, overnight, OR30, IB60, VWAP), tendance OUVERTURE / MIDI / FIN (heure NY) + continuation/retournement, comportement aux niveaux, test des stops (fixe, suiveur, BE+suiveur, ATR, structurel). |
 | `tools/scalp_lab.py` | 8 techniques × 18 sorties (objectif 10/15/20, stop 10/15/20, ± break-even) ; verdict « ≥ 60 % ET espérance > 0 ET tient sur chaque moitié de la période ». |
+| `tools/daily_report.py` | **Le rapport quotidien à envoyer** (`RAPPORT-AAAA-MM-JJ.md`) : langage simple, meilleurs tests avec les calculs, décisions garder/surveiller/écarter. Format : `docs/RAPPORT_QUOTIDIEN.md`. |
+| `AGENTS.md` | Règles et routine quotidienne pour les agents. |
 | `docs/STRATEGIES.md` | Catalogue des techniques, règles, maths du % minimum, protocole de validation, **journal des résultats à tenir à jour**. |
 | `docs/DAILY_ANALYSIS.md` | Utilisation et installation. |
-| `tools/run_daily_analysis.sh` + `deploy/install_daily_analysis.sh` | launchd : 11:05, 14:05, 16:20 NY lun-ven → `~/hermes-data/reports/` (+ `RESUME-AAAA-MM-JJ.md`, notification macOS). |
-| `tests/unit/test_day_analysis.py`, `tests/unit/test_scalp_lab.py` | Stops, brackets, pas de look-ahead, replay rapide = replay complet, cache. |
+| `tools/run_daily_analysis.sh` + `deploy/install_daily_analysis.sh` | launchd : 11:05, 14:05, 16:20 NY lun-ven → `~/hermes-data/reports/` (+ `RAPPORT-AAAA-MM-JJ.md`, notification macOS). |
+| `tests/unit/test_day_analysis.py`, `tests/unit/test_scalp_lab.py`, `tests/unit/test_daily_report.py` | Stops, brackets, pas de look-ahead, replay rapide = replay complet, cache. |
 
 ## Points techniques à connaître
 
@@ -35,10 +37,11 @@ journée, et tester le déplacement du stop.
 
 ## À faire mercredi
 
-1. Lire `~/hermes-data/reports/RESUME-2026-11-02.md` et `RESUME-2026-11-03.md`, `scalp-10-jours.md`,
-   `scalp-20-jours.md`.
+1. Lire `~/hermes-data/reports/RAPPORT-2026-11-02.md` et `RAPPORT-2026-11-03.md` (régénérer si absent :
+   `tools/run_daily_analysis.sh AAAA-MM-JJ` après 16:00 NY).
 2. Reporter les verdicts dans le **journal** de `docs/STRATEGIES.md`.
-3. Brancher `RESUME-*.md` sur l'envoi Slack de `d1-slack-human-approval` (analyse quotidienne).
+3. Brancher `RAPPORT-*.md` sur l'envoi Slack de `d1-slack-human-approval` (section 1 dans le message,
+   rapport complet joint) — voir `docs/RAPPORT_QUOTIDIEN.md` et `AGENTS.md`.
 4. Pistes : barres 30 s pour lever les ambiguïtés ; filtre de régime (jour de tendance vs range détecté
    sur l'ouverture) pour n'activer que les techniques adaptées ; walk-forward (calibrer sur N jours,
    tester sur les suivants).

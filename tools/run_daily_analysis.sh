@@ -1,5 +1,6 @@
 #!/bin/bash
 # Lance l'analyse journalière Hermès (READ-ONLY) et range les rapports dans ~/hermes-data/reports/.
+# Après la clôture : RAPPORT-<date>.md = le document à envoyer (voir docs/RAPPORT_QUOTIDIEN.md).
 # Appelé par launchd (deploy/install_daily_analysis.sh) à 11:05, 14:05 et 16:20 heure de New York,
 # ou à la main :  tools/run_daily_analysis.sh [AAAA-MM-JJ]
 set -u
@@ -21,25 +22,21 @@ if [ "$STAMP" -ge 1600 ]; then
     "$PY" tools/day_analysis.py --days 10 --out "$OUT/agregat-10-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
     "$PY" tools/scalp_lab.py --date "$DAY" --out "$OUT/scalp-$DAY.md" --json "$OUT/scalp-$DAY.json" \
         > /dev/null 2>> "$OUT/$DAY.err"
-    "$PY" tools/scalp_lab.py --days 10 --out "$OUT/scalp-10-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
-    "$PY" tools/scalp_lab.py --days 20 --lookback 35 --out "$OUT/scalp-20-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
-    {
-        echo "# Résumé Hermès $DAY"
-        echo
-        for f in "$OUT/$DAY.md" "$OUT/scalp-$DAY.md" "$OUT/scalp-10-jours.md" "$OUT/scalp-20-jours.md"; do
-            [ -f "$f" ] || continue
-            echo "## $(head -1 "$f" | sed 's/^# //')"
-            # tendance par segment + verdict scalping
-            grep -E '^\| (OUVERTURE|MIDI|FIN) \||^(✅|❌)|^- \*\*' "$f" | head -12
-            sed -n '/^## Verdict/,/^## Quand/p' "$f" | grep -E '^\| [^T-]' | head -5
-            echo
-        done
-    } > "$OUT/RESUME-$DAY.md"
+    "$PY" tools/scalp_lab.py --days 10 --out "$OUT/scalp-10-jours.md" --json "$OUT/scalp-10-jours.json" \
+        > /dev/null 2>> "$OUT/$DAY.err"
+    "$PY" tools/scalp_lab.py --days 20 --lookback 35 --out "$OUT/scalp-20-jours.md" --json "$OUT/scalp-20-jours.json" \
+        > /dev/null 2>> "$OUT/$DAY.err"
+    # LE rapport à envoyer (langage simple + maths) : docs/RAPPORT_QUOTIDIEN.md
+    "$PY" tools/daily_report.py --date "$DAY" --reports-dir "$OUT" > /dev/null 2>> "$OUT/$DAY.err"
     VERDICT="$(grep -hE '^(✅|❌)' "$OUT/scalp-10-jours.md" 2>/dev/null | head -1 | sed 's/\*//g' | cut -c1-120)"
 fi
 
 if [ $RC -eq 0 ]; then
-    MSG="Analyse $DAY ($STAMP) prête : $OUT/$DAY.md ${VERDICT:+— 10 j : $VERDICT}"
+    if [ -f "$OUT/RAPPORT-$DAY.md" ] && [ "$STAMP" -ge 1600 ]; then
+        MSG="Rapport $DAY prêt : $OUT/RAPPORT-$DAY.md ${VERDICT:+— 10 j : $VERDICT}"
+    else
+        MSG="Analyse $DAY ($STAMP) prête : $OUT/$DAY.md"
+    fi
 else
     MSG="Analyse $DAY ($STAMP) ÉCHEC rc=$RC : voir $OUT/$DAY.err"
 fi

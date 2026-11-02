@@ -76,8 +76,8 @@ python tools/scalp_lab.py --date 2026-11-02  # détail des trades d'un jour
 ```
 
 Automatique (Mac mini, après `bash deploy/install_daily_analysis.sh`) : à 16:20 NY, rapports dans
-`~/hermes-data/reports/` : `scalp-AAAA-MM-JJ.md`, `scalp-10-jours.md`, `scalp-20-jours.md` et
-`RESUME-AAAA-MM-JJ.md` (tendances + verdicts sur une page).
+`~/hermes-data/reports/` : `scalp-AAAA-MM-JJ.md`, `scalp-10-jours.md`, `scalp-20-jours.md` et surtout
+`RAPPORT-AAAA-MM-JJ.md`, le rapport en langage simple avec les calculs (voir `docs/RAPPORT_QUOTIDIEN.md`).
 
 ## Journal des résultats
 
