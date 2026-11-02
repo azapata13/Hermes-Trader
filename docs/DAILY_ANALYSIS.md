@@ -17,3 +17,6 @@ Lancement automatique 11:05, 14:05, 16:20 (NY), lun-ven. Rapports : `~/hermes-da
 `agregat-10-jours.md` après la clôture), notification macOS, journal `~/hermes-data/logs/daily_analysis.log`.
 
 À la main : `tools/run_daily_analysis.sh 2026-11-02` ou `python tools/day_analysis.py --days 10`.
+
+Labo scalping (objectif ≥ 60 % de gagnants, 10-20 pts) : `python tools/scalp_lab.py --days 10` — voir `docs/STRATEGIES.md`.
+Passation : `docs/HANDOFF_CODEX.md`.

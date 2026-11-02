@@ -76,6 +76,13 @@ def test_fast_replay_skipping_depth_gives_identical_bars(tmp_path):
     sc.tick()
     write_hrec(tmp_path, sc.events)
     cfg = load_config(DEFAULT_CONFIG_PATH)
-    full, _ = load_bars([tmp_path], cfg, with_depth=True)
-    fast, _ = load_bars([tmp_path], cfg, with_depth=False)
+    full, _ = load_bars([tmp_path], cfg, with_depth=True, use_cache=False)
+    fast, _ = load_bars([tmp_path], cfg, with_depth=False, use_cache=False)
     assert full and full == fast
+    # cache: second load comes from disk and is identical
+    import tools.day_analysis as da
+    da.CACHE_DIR = tmp_path / "cache"
+    first, c1 = load_bars([tmp_path], cfg)
+    assert list(da.CACHE_DIR.glob("*.json"))
+    second, c2 = load_bars([tmp_path], cfg)
+    assert first == second == fast and c1 == c2

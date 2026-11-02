@@ -15,13 +15,31 @@ cd "$REPO" || exit 1
     --out "$OUT/$DAY.md" --json "$OUT/$DAY.json" > /dev/null 2> "$OUT/$DAY.err"
 RC=$?
 cp -f "$OUT/$DAY.md" "$OUT/$DAY-$STAMP.md" 2>/dev/null
-# Agrégat glissant des stops sur 10 jours, seulement après la clôture
+# Après la clôture : agrégat des stops + labo scalping (jour, 10 jours, 20 jours) + résumé
+VERDICT=""
 if [ "$STAMP" -ge 1600 ]; then
     "$PY" tools/day_analysis.py --days 10 --out "$OUT/agregat-10-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
+    "$PY" tools/scalp_lab.py --date "$DAY" --out "$OUT/scalp-$DAY.md" --json "$OUT/scalp-$DAY.json" \
+        > /dev/null 2>> "$OUT/$DAY.err"
+    "$PY" tools/scalp_lab.py --days 10 --out "$OUT/scalp-10-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
+    "$PY" tools/scalp_lab.py --days 20 --lookback 35 --out "$OUT/scalp-20-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
+    {
+        echo "# Résumé Hermès $DAY"
+        echo
+        for f in "$OUT/$DAY.md" "$OUT/scalp-$DAY.md" "$OUT/scalp-10-jours.md" "$OUT/scalp-20-jours.md"; do
+            [ -f "$f" ] || continue
+            echo "## $(head -1 "$f" | sed 's/^# //')"
+            # tendance par segment + verdict scalping
+            grep -E '^\| (OUVERTURE|MIDI|FIN) \||^(✅|❌)|^- \*\*' "$f" | head -12
+            sed -n '/^## Verdict/,/^## Quand/p' "$f" | grep -E '^\| [^T-]' | head -5
+            echo
+        done
+    } > "$OUT/RESUME-$DAY.md"
+    VERDICT="$(grep -hE '^(✅|❌)' "$OUT/scalp-10-jours.md" 2>/dev/null | head -1 | sed 's/\*//g' | cut -c1-120)"
 fi
 
 if [ $RC -eq 0 ]; then
-    MSG="Analyse $DAY ($STAMP) prête : $OUT/$DAY.md"
+    MSG="Analyse $DAY ($STAMP) prête : $OUT/$DAY.md ${VERDICT:+— 10 j : $VERDICT}"
 else
     MSG="Analyse $DAY ($STAMP) ÉCHEC rc=$RC : voir $OUT/$DAY.err"
 fi

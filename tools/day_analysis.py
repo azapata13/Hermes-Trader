@@ -469,13 +469,50 @@ def iter_events_fast(session_dir: Path, skip: frozenset[str]):
                 yield dec.raw(rec)
 
 
-def load_bars(dirs: list[Path], cfg, with_depth: bool = False) -> tuple[list[B], dict]:
+CACHE_DIR = Path("~/hermes-data/cache/day_analysis").expanduser()
+CACHE_VERSION = 1
+
+
+def _cache_key(d: Path, with_depth: bool) -> str:
+    import hashlib
+    parts = sorted(d.glob("part-*.hrec"))
+    sig = "|".join(f"{p.name}:{p.stat().st_size}:{p.stat().st_mtime_ns}" for p in parts)
+    return hashlib.sha256(f"{CACHE_VERSION}|{d.resolve()}|{with_depth}|{sig}".encode()).hexdigest()[:32]
+
+
+def _cached_replay(d: Path, cfg, with_depth: bool) -> tuple[list[B], dict]:
+    """Replay one session, reusing a cached result while its part files are unchanged."""
+    from hermes.storage.reader import iter_raw_events
+    path = CACHE_DIR / f"{_cache_key(d, with_depth)}.json"
+    try:
+        raw = json.loads(path.read_text())
+        bars = [B(datetime.fromisoformat(x[0]), *x[1:]) for x in raw["bars"]]
+        return bars, raw["ctx"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    src = iter_raw_events(d) if with_depth else iter_events_fast(d, SKIP_FAST)
+    bl, c = replay_bars(src, cfg, with_depth)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"bars": [[b.t.isoformat(), b.o, b.h, b.l, b.c, b.v, b.buy, b.sell, b.vwap_num]
+                                            for b in bl], "ctx": c}))
+        tmp.replace(path)
+    except OSError:
+        pass  # the cache is an optimization only
+    return bl, c
+
+
+def load_bars(dirs: list[Path], cfg, with_depth: bool = False, use_cache: bool = True) -> tuple[list[B], dict]:
     from hermes.storage.reader import iter_raw_events
     lists, ctx = [], {}
     for d in dirs:
         try:
-            src = iter_raw_events(d) if with_depth else iter_events_fast(d, SKIP_FAST)
-            bl, c = replay_bars(src, cfg, with_depth)
+            if use_cache:
+                bl, c = _cached_replay(d, cfg, with_depth)
+            else:
+                src = iter_raw_events(d) if with_depth else iter_events_fast(d, SKIP_FAST)
+                bl, c = replay_bars(src, cfg, with_depth)
         except Exception as e:  # one damaged session must not kill the daily report
             print(f"{d}: replay impossible ({e!r}), session ignorée", file=sys.stderr)
             continue
@@ -514,6 +551,40 @@ def day_context(bars: list[B], day: date, ctx: dict) -> dict:
     if p is not None:
         out["prev"] = p
     return out
+
+
+class NoData(Exception):
+    """(message, exit code)"""
+
+
+def collect(root: Path, want: date | None, n_days: int, lookback: int, cfg,
+            with_depth: bool = False) -> tuple[list[B], list[date], dict]:
+    """Replay the relevant sessions under ``root``; return (all bars, selected trading days, ctx)."""
+    if not root.is_dir():
+        raise NoData(f"Dossier introuvable : {root}", 2)
+    if want is not None:
+        since = datetime.combine(want - timedelta(days=1), dtime(0, 0), NY).timestamp()
+        if lookback:
+            since = min(since, (datetime.now(NY) - timedelta(days=lookback)).timestamp())
+        dirs = recent_sessions(root, since)
+    else:
+        lb = lookback or (n_days + 4)
+        dirs = recent_sessions(root, (datetime.now(NY) - timedelta(days=lb)).timestamp())
+    if not dirs:
+        raise NoData(f"Aucune session enregistrée récente sous {root}", 2)
+    print(f"Sessions rejouées : {len(dirs)}", file=sys.stderr)
+    bars, ctx = load_bars(dirs, cfg, with_depth)
+    days = trading_days(bars)
+    if want is not None:
+        days = [d for d in days if d == want]
+        if not days:
+            raise NoData(f"Aucune barre RTH le {want} (jours disponibles : "
+                         f"{', '.join(d.isoformat() for d in trading_days(bars)) or 'aucun'})", 3)
+    else:
+        days = days[-n_days:]
+    if not days:
+        raise NoData("Aucune séance RTH dans les enregistrements rejoués", 3)
+    return bars, days, ctx
 
 
 def synthetic_day(seed: int = 7) -> tuple[list[B], dict]:
@@ -559,35 +630,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cfg = load_config(args.config)
         root = Path(args.path).expanduser()
-        if not root.is_dir():
-            print(f"Dossier introuvable : {root}", file=sys.stderr)
-            return 2
         want = date.fromisoformat(args.date) if args.date else None
-        lookback = args.lookback or (args.days + 4)
-        if want is not None:
-            since = datetime.combine(want - timedelta(days=1), dtime(0, 0), NY).timestamp()
-            if not args.lookback:
-                lookback = 0
-        else:
-            since = (datetime.now(NY) - timedelta(days=lookback)).timestamp()
-        dirs = recent_sessions(root, since) if (want is not None or lookback) else session_dirs(root)
-        if not dirs:
-            print(f"Aucune session enregistrée récente sous {root}", file=sys.stderr)
-            return 2
-        print(f"Sessions rejouées : {len(dirs)}", file=sys.stderr)
-        bars, ctx = load_bars(dirs, cfg, args.with_depth)
-        days = trading_days(bars)
-        if want is not None:
-            days = [d for d in days if d == want]
-            if not days:
-                print(f"Aucune barre RTH le {want} (jours disponibles : "
-                      f"{', '.join(d.isoformat() for d in trading_days(bars)) or 'aucun'})", file=sys.stderr)
-                return 3
-        else:
-            days = days[-args.days:]
-        if not days:
-            print("Aucune séance RTH dans les enregistrements rejoués", file=sys.stderr)
-            return 3
+        try:
+            bars, days, ctx = collect(root, want, args.days, args.lookback, cfg, args.with_depth)
+        except NoData as e:
+            print(e.args[0], file=sys.stderr)
+            return e.args[1]
         for d in days:
             db = slice_day(bars, d)
             results.append((analyse_day(db, day_context(bars, d, ctx)), stop_tests(db, args.slip)))
