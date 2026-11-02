@@ -5,7 +5,7 @@ READ-ONLY : rejoue des enregistrements .hrec (Normalizer + MarketEngine, barres 
 rapport. Aucune connexion IBKR, aucun ordre.
 
     python tools/day_analysis.py                          # dernier jour sous ~/hermes-data/recordings
-    python tools/day_analysis.py --date 2026-11-02         # un jour précis (toutes les sessions du jour)
+    python tools/day_analysis.py --date 2026-11-02         # un jour de trading précis (heure de New York)
     python tools/day_analysis.py --days 10                 # les 10 derniers jours + agrégat des stops
     python tools/day_analysis.py <session_dir|date_dir> --out rapport.md --json rapport.json
     python tools/day_analysis.py --synthetic               # démo sans enregistrement
@@ -36,7 +36,7 @@ import dataclasses
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -419,24 +419,72 @@ def render_aggregate(days: list[tuple[dict, list[dict]]]) -> str:
 
 
 # ------------------------------------------------------------------------------------------- input
+# The recorder files a session under the UTC date of its START (<root>/<YYYY-MM-DD>/<session_id>/):
+# a session running for days stays in its first date folder. Days are therefore NOT selected by
+# folder name: every recent session is replayed and its bars are split by New York trading day.
 def session_dirs(path: Path) -> list[Path]:
     if any(path.glob("part-*.hrec")):
         return [path]
-    return sorted(p for p in path.iterdir() if p.is_dir() and any(p.glob("part-*.hrec")))
+    found = sorted(p for p in path.iterdir() if p.is_dir() and any(p.glob("part-*.hrec")))
+    if found:
+        return found
+    return sorted(p for p in path.glob("*/*") if p.is_dir() and any(p.glob("part-*.hrec")))
 
 
-def day_dirs(root: Path) -> list[Path]:
-    return sorted(p for p in root.iterdir() if p.is_dir() and session_dirs(p))
+def recent_sessions(root: Path, since_epoch: float) -> list[Path]:
+    """Every session that wrote a part file after ``since_epoch`` (whatever its date folder)."""
+    out = []
+    for d in session_dirs(root):
+        parts = list(d.glob("part-*.hrec"))
+        if parts and max(x.stat().st_mtime for x in parts) >= since_epoch:
+            out.append(d)
+    return out
 
 
-def load_day(dirs: list[Path], cfg) -> tuple[list[B], dict]:
+def load_bars(dirs: list[Path], cfg) -> tuple[list[B], dict]:
     from hermes.storage.reader import iter_raw_events
     lists, ctx = [], {}
     for d in dirs:
-        bl, c = replay_bars(iter_raw_events(d), cfg)
+        try:
+            bl, c = replay_bars(iter_raw_events(d), cfg)
+        except Exception as e:  # one damaged session must not kill the daily report
+            print(f"{d}: replay impossible ({e!r}), session ignorée", file=sys.stderr)
+            continue
         lists.append(bl)
-        ctx = {**c, **ctx} if ctx else c
+        if bl and (not ctx.get("_last") or bl[-1].t > ctx["_last"]):
+            ctx = {**c, "_last": bl[-1].t}
     return merge_bars(lists), ctx
+
+
+def trading_days(bars: list[B]) -> list[date]:
+    return sorted({b.t.date() for b in bars if in_win(b, dtime(9, 30), dtime(16, 0))})
+
+
+def slice_day(bars: list[B], day: date) -> list[B]:
+    """Globex day for ``day``: previous evening 18:00 NY -> 16:00 NY."""
+    a = datetime.combine(day - timedelta(days=1), dtime(18, 0), NY)
+    z = datetime.combine(day, dtime(16, 0), NY)
+    return [b for b in bars if a <= b.t < z]
+
+
+def prev_rth(bars: list[B], day: date) -> dict | None:
+    before = [d for d in trading_days(bars) if d < day]
+    if not before:
+        return None
+    d = before[-1]
+    rth = [b for b in bars if b.t.date() == d and in_win(b, dtime(9, 30), dtime(16, 0))]
+    return {"date": d.isoformat(), "high": max(b.h for b in rth), "low": min(b.l for b in rth),
+            "close": rth[-1].c, "complete": len(rth) >= 380}
+
+
+def day_context(bars: list[B], day: date, ctx: dict) -> dict:
+    out = {"symbol": ctx.get("symbol", "MNQ")}
+    p = prev_rth(bars, day)
+    if p is None and ctx.get("prev") and ctx.get("_last") and ctx["_last"].date() == day:
+        p = ctx["prev"]  # engine's previous session (only valid when the replay ended on this day)
+    if p is not None:
+        out["prev"] = p
+    return out
 
 
 def synthetic_day(seed: int = 7) -> tuple[list[B], dict]:
@@ -444,7 +492,6 @@ def synthetic_day(seed: int = 7) -> tuple[list[B], dict]:
     rng = random.Random(seed)
     out, px = [], 21000.0
     base = datetime(2026, 11, 2, 9, 30, tzinfo=NY)
-    from datetime import timedelta
     for m in range(390):
         drift = 0.35 if m < 90 else (-0.05 if m < 270 else -0.3)
         o = px
@@ -461,9 +508,12 @@ def synthetic_day(seed: int = 7) -> tuple[list[B], dict]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path", nargs="?", default=str(DEFAULT_ROOT))
-    ap.add_argument("--date", help="YYYY-MM-DD (dossier sous la racine des enregistrements)")
-    ap.add_argument("--days", type=int, default=1, help="analyser les N derniers jours + agrégat")
+    ap.add_argument("path", nargs="?", default=str(DEFAULT_ROOT),
+                    help="racine des enregistrements, un dossier de date ou un dossier de session")
+    ap.add_argument("--date", help="jour de trading YYYY-MM-DD (heure de New York). Défaut : dernier jour disponible")
+    ap.add_argument("--days", type=int, default=1, help="analyser les N derniers jours de trading + agrégat")
+    ap.add_argument("--lookback", type=int, default=0,
+                    help="ne rejouer que les sessions modifiées dans les N derniers jours (0 = auto)")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--slip", type=float, default=0.25, help="glissement par sortie, en points")
     ap.add_argument("--out", help="écrire le rapport Markdown ici")
@@ -478,22 +528,38 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cfg = load_config(args.config)
         root = Path(args.path).expanduser()
-        if args.date:
-            groups = [session_dirs(root / args.date)]
-        elif any(root.glob("part-*.hrec")) or (root.is_dir() and session_dirs(root) and not day_dirs(root)):
-            groups = [session_dirs(root)]
-        else:
-            groups = [session_dirs(d) for d in day_dirs(root)[-args.days:]]
-        groups = [g for g in groups if g]
-        if not groups:
-            print(f"Aucun enregistrement trouvé sous {root}", file=sys.stderr)
+        if not root.is_dir():
+            print(f"Dossier introuvable : {root}", file=sys.stderr)
             return 2
-        for g in groups:
-            bars, ctx = load_day(g, cfg)
-            if not bars:
-                print(f"{g[0].parent}: aucune barre 1 m", file=sys.stderr)
-                continue
-            results.append((analyse_day(bars, ctx), stop_tests(bars, args.slip)))
+        want = date.fromisoformat(args.date) if args.date else None
+        lookback = args.lookback or (args.days + 4)
+        if want is not None:
+            since = datetime.combine(want - timedelta(days=1), dtime(0, 0), NY).timestamp()
+            if not args.lookback:
+                lookback = 0
+        else:
+            since = (datetime.now(NY) - timedelta(days=lookback)).timestamp()
+        dirs = recent_sessions(root, since) if (want is not None or lookback) else session_dirs(root)
+        if not dirs:
+            print(f"Aucune session enregistrée récente sous {root}", file=sys.stderr)
+            return 2
+        print(f"Sessions rejouées : {len(dirs)}", file=sys.stderr)
+        bars, ctx = load_bars(dirs, cfg)
+        days = trading_days(bars)
+        if want is not None:
+            days = [d for d in days if d == want]
+            if not days:
+                print(f"Aucune barre RTH le {want} (jours disponibles : "
+                      f"{', '.join(d.isoformat() for d in trading_days(bars)) or 'aucun'})", file=sys.stderr)
+                return 3
+        else:
+            days = days[-args.days:]
+        if not days:
+            print("Aucune séance RTH dans les enregistrements rejoués", file=sys.stderr)
+            return 3
+        for d in days:
+            db = slice_day(bars, d)
+            results.append((analyse_day(db, day_context(bars, d, ctx)), stop_tests(db, args.slip)))
     text = "\n\n---\n\n".join(render(d, t) for d, t in results)
     if len(results) > 1:
         text += "\n\n---\n\n" + render_aggregate(results)
