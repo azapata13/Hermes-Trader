@@ -35,10 +35,22 @@ journée, et tester le déplacement du stop.
 - La branche locale du Mac `d1-slack-human-approval` diverge de `main` ; les fichiers ci-dessus y ont été
   copiés via `git checkout origin/main -- …` (non commités sur cette branche).
 
+## État au mardi 2026-11-03 soir
+
+- Les rapports réels **ne sont que sur le Mac mini** (`~/hermes-data/reports/`) : la session cloud n'a pas
+  pu y accéder, donc **le journal de `docs/STRATEGIES.md` n'est pas encore rempli**.
+- Lundi 2 : l'automatisation launchd a tourné (13:42, 14:05, 16:20) mais avec l'ancienne version du script,
+  sans labo ni RAPPORT. Le correctif (`d1d8481`, analyse complète aussi pour un jour passé) est sur `main`.
+- Sur le Mac, les fichiers de `main` ont été copiés dans la branche locale `d1-slack-human-approval` via
+  `git checkout origin/main -- …`. **Vérifier `git status`** : seuls les fichiers listés plus haut doivent
+  venir de `main` ; tout autre fichier modifié dans `tools/`, `docs/`, `deploy/`, `tests/unit/` doit être
+  remis à la version de la branche (`git checkout HEAD -- <fichier>`).
+
 ## À faire mercredi
 
-1. Lire `~/hermes-data/reports/RAPPORT-2026-11-02.md` et `RAPPORT-2026-11-03.md` (régénérer si absent :
-   `tools/run_daily_analysis.sh AAAA-MM-JJ` après 16:00 NY).
+1. Générer/lire `~/hermes-data/reports/RAPPORT-2026-11-02.md` et `RAPPORT-2026-11-03.md` :
+   `git checkout origin/main -- tools/run_daily_analysis.sh` puis `bash tools/run_daily_analysis.sh 2026-11-02`
+   et `… 2026-11-03` (s'ils manquent), et envoyer les deux rapports à Felipe.
 2. Reporter les verdicts dans le **journal** de `docs/STRATEGIES.md`.
 3. Brancher `RAPPORT-*.md` sur l'envoi Slack de `d1-slack-human-approval` (section 1 dans le message,
    rapport complet joint) — voir `docs/RAPPORT_QUOTIDIEN.md` et `AGENTS.md`.
