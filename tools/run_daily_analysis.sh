@@ -10,6 +10,10 @@ mkdir -p "$OUT" "$HOME/hermes-data/logs"
 if [ -x "$REPO/.venv/bin/python" ]; then PY="$REPO/.venv/bin/python"; else PY="$(command -v python3)"; fi
 DAY="${1:-$(TZ=America/New_York date +%F)}"
 STAMP="$(TZ=America/New_York date +%H%M)"
+TODAY="$(TZ=America/New_York date +%F)"
+# Full after-close analysis when the market is closed for that day: after 16:00 NY, or a past day.
+AFTER_CLOSE=0
+if [ "$STAMP" -ge 1600 ] || [ "$DAY" \< "$TODAY" ]; then AFTER_CLOSE=1; fi
 cd "$REPO" || exit 1
 
 "$PY" tools/day_analysis.py --date "$DAY" \
@@ -18,7 +22,7 @@ RC=$?
 cp -f "$OUT/$DAY.md" "$OUT/$DAY-$STAMP.md" 2>/dev/null
 # Après la clôture : agrégat des stops + labo scalping (jour, 10 jours, 20 jours) + résumé
 VERDICT=""
-if [ "$STAMP" -ge 1600 ]; then
+if [ "$AFTER_CLOSE" -eq 1 ]; then
     "$PY" tools/day_analysis.py --days 10 --out "$OUT/agregat-10-jours.md" > /dev/null 2>> "$OUT/$DAY.err"
     "$PY" tools/scalp_lab.py --date "$DAY" --out "$OUT/scalp-$DAY.md" --json "$OUT/scalp-$DAY.json" \
         > /dev/null 2>> "$OUT/$DAY.err"
@@ -32,7 +36,7 @@ if [ "$STAMP" -ge 1600 ]; then
 fi
 
 if [ $RC -eq 0 ]; then
-    if [ -f "$OUT/RAPPORT-$DAY.md" ] && [ "$STAMP" -ge 1600 ]; then
+    if [ -f "$OUT/RAPPORT-$DAY.md" ] && [ "$AFTER_CLOSE" -eq 1 ]; then
         MSG="Rapport $DAY prêt : $OUT/RAPPORT-$DAY.md ${VERDICT:+— 10 j : $VERDICT}"
     else
         MSG="Analyse $DAY ($STAMP) prête : $OUT/$DAY.md"
